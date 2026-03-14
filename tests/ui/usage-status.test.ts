@@ -18,11 +18,11 @@ const buildLog = (partial: Partial<{ status: string; upstream_status: number | n
 describe("usage status detail", () => {
 	it("renders success label", () => {
 		const detail = buildUsageStatusDetail(buildLog({ status: "ok" }) as any);
-		expect(detail.label).toBe("成功");
+		expect(detail.label).toBe("-");
 		expect(detail.tone).toBe("success");
 	});
 
-	it("renders failure with status and code", () => {
+	it("renders failure with status code", () => {
 		const detail = buildUsageStatusDetail(
 			buildLog({
 				status: "error",
@@ -31,9 +31,7 @@ describe("usage status detail", () => {
 				error_message: "Invalid API key",
 			}) as any,
 		);
-		expect(detail.label).toContain("失败");
-		expect(detail.label).toContain("403");
-		expect(detail.label).toContain("authentication_error");
-		expect(detail.message).toBe("Invalid API key");
+		expect(detail.label).toBe("403");
+		expect(detail.tone).toBe("error");
 	});
 });

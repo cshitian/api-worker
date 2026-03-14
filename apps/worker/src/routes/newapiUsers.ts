@@ -5,7 +5,6 @@ import {
 	listModelsByChannelWithFallback,
 } from "../services/channel-model-capabilities";
 import { listActiveChannels } from "../services/channel-repo";
-import { getModelCapabilityTtlHours } from "../services/settings";
 import { newApiSuccess } from "../utils/newapi-response";
 
 const users = new Hono<AppEnv>({ strict: false });
@@ -13,8 +12,6 @@ users.use("*", newApiAuth);
 
 users.get("/models", async (c) => {
 	const channels = await listActiveChannels(c.env.DB);
-	const ttlHours = await getModelCapabilityTtlHours(c.env.DB);
-	const ttlSeconds = Math.max(1, Math.floor(ttlHours)) * 60 * 60;
 	const map = await listModelsByChannelWithFallback(
 		c.env.DB,
 		channels.map((channel) => ({
@@ -22,7 +19,6 @@ users.get("/models", async (c) => {
 			name: channel.name,
 			models_json: channel.models_json,
 		})),
-		ttlSeconds,
 	);
 	const modelSet = new Set<string>();
 	for (const models of map.values()) {

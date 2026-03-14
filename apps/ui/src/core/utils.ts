@@ -26,6 +26,87 @@ export const formatDateTime = (value?: string | null) => {
 	)}`;
 };
 
+const formatInTimeZone = (
+	value: string | null | undefined,
+	timeZone: string,
+	parts: Array<"year" | "month" | "day" | "hour" | "minute" | "second">,
+	separator: { date: string },
+): string => {
+	if (!value) {
+		return "-";
+	}
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) {
+		return "-";
+	}
+	const formatter = new Intl.DateTimeFormat("en-CA", {
+		timeZone,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+	});
+	const dateParts = formatter.formatToParts(date);
+	const pick = (type: string) =>
+		dateParts.find((part) => part.type === type)?.value ?? "00";
+	const dateText = `${pick("year")}-${pick("month")}-${pick("day")}`;
+	const timeText = parts.includes("second")
+		? `${pick("hour")}:${pick("minute")}:${pick("second")}`
+		: `${pick("hour")}:${pick("minute")}`;
+	return `${dateText}${separator.date}${timeText}`.trim();
+};
+
+export const formatChinaDateTime = (value?: string | null) =>
+	formatInTimeZone(
+		value,
+		"Asia/Shanghai",
+		["year", "month", "day", "hour", "minute", "second"],
+		{ date: " " },
+	);
+
+export const toChinaDateTimeInput = (value?: string | null) => {
+	if (!value) {
+		return "";
+	}
+	const formatted = formatInTimeZone(
+		value,
+		"Asia/Shanghai",
+		["year", "month", "day", "hour", "minute"],
+		{ date: "T" },
+	);
+	return formatted === "-" ? "" : formatted;
+};
+
+export const toChinaIsoFromInput = (value?: string | null) => {
+	if (!value) {
+		return null;
+	}
+	const raw = value.trim();
+	if (!raw) {
+		return null;
+	}
+	const [datePart, timePart] = raw.split("T");
+	if (!datePart || !timePart) {
+		return null;
+	}
+	const [year, month, day] = datePart.split("-").map(Number);
+	const [hour, minute] = timePart.split(":").map(Number);
+	if (
+		Number.isNaN(year) ||
+		Number.isNaN(month) ||
+		Number.isNaN(day) ||
+		Number.isNaN(hour) ||
+		Number.isNaN(minute)
+	) {
+		return null;
+	}
+	const utcMillis = Date.UTC(year, month - 1, day, hour - 8, minute);
+	return new Date(utcMillis).toISOString();
+};
+
 /**
  * Toggles channel or token status between active and disabled.
  *
@@ -79,63 +160,20 @@ export const buildPageItems = (current: number, total: number): PageItem[] => {
 	});
 };
 
-const truncateText = (value: string | null | undefined, max = 80) => {
-	if (!value) {
-		return null;
-	}
-	const trimmed = value.trim();
-	if (!trimmed) {
-		return null;
-	}
-	return trimmed.length > max ? `${trimmed.slice(0, max)}...` : trimmed;
-};
-
-const describeError = (status?: number | null, code?: string | null) => {
-	const normalized = (code ?? "").toLowerCase();
-	if (status === 401 || status === 403) {
-		return "鉴权失败";
-	}
-	if (status === 429 || normalized.includes("rate")) {
-		return "触发限流";
-	}
-	if (
-		normalized.includes("insufficient") ||
-		normalized.includes("quota") ||
-		normalized.includes("balance")
-	) {
-		return "余额不足";
-	}
-	if (normalized.includes("model")) {
-		return "模型不可用";
-	}
-	return null;
-};
-
 export type UsageStatusDetail = {
 	label: string;
-	message: string | null;
 	tone: "success" | "error";
 };
 
 export const buildUsageStatusDetail = (log: UsageLog): UsageStatusDetail => {
-	if (log.status === "ok") {
-		return { label: "成功", message: null, tone: "success" };
-	}
-	const parts: string[] = [];
-	if (log.upstream_status !== null && log.upstream_status !== undefined) {
-		parts.push(String(log.upstream_status));
-	}
-	if (log.error_code) {
-		parts.push(log.error_code);
-	}
-	const hint = describeError(log.upstream_status, log.error_code ?? null);
-	if (hint) {
-		parts.push(hint);
-	}
-	const suffix = parts.length > 0 ? ` (${parts.join(" / ")})` : "";
+	const statusCode = log.upstream_status ?? null;
+	const isOk = log.status === "ok";
+	const label =
+		statusCode !== null && statusCode !== undefined
+			? String(statusCode)
+			: "-";
 	return {
-		label: `失败${suffix}`,
-		message: truncateText(log.error_message),
-		tone: "error",
+		label,
+		tone: isOk ? "success" : "error",
 	};
 };

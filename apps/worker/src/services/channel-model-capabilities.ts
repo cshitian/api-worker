@@ -3,17 +3,15 @@ import { nowIso } from "../utils/time";
 import { extractModelIds } from "./channel-models";
 import type { ModelEntry } from "./channel-models";
 
-export const DEFAULT_MODEL_CAPABILITY_TTL_SEC = 2 * 60 * 60;
-
 export type CapabilityRow = {
 	channel_id: string;
 	model: string;
 	last_ok_at: number | null;
+	last_err_count?: number | null;
 };
 
 export function buildCapabilityMap(
 	rows: CapabilityRow[],
-	cutoff: number,
 ): Map<string, Set<string>> {
 	const map = new Map<string, Set<string>>();
 	for (const row of rows) {
@@ -21,7 +19,7 @@ export function buildCapabilityMap(
 			continue;
 		}
 		const lastOk = Number(row.last_ok_at ?? 0);
-		if (!lastOk || lastOk < cutoff) {
+		if (!lastOk || lastOk <= 0) {
 			continue;
 		}
 		const set = map.get(row.channel_id) ?? new Set<string>();
@@ -34,30 +32,27 @@ export function buildCapabilityMap(
 export async function listVerifiedModelsByChannel(
 	db: D1Database,
 	channelIds: string[],
-	ttlSeconds: number = DEFAULT_MODEL_CAPABILITY_TTL_SEC,
 ): Promise<Map<string, Set<string>>> {
 	if (channelIds.length === 0) {
 		return new Map();
 	}
-	const cutoff = Math.floor(Date.now() / 1000) - ttlSeconds;
 	const placeholders = channelIds.map(() => "?").join(", ");
 	const rows = await db
 		.prepare(
-			`SELECT channel_id, model, last_ok_at FROM channel_model_capabilities WHERE channel_id IN (${placeholders}) AND last_ok_at >= ?`,
+			`SELECT channel_id, model, last_ok_at FROM channel_model_capabilities WHERE channel_id IN (${placeholders}) AND last_ok_at > 0`,
 		)
-		.bind(...channelIds, cutoff)
+		.bind(...channelIds)
 		.all<CapabilityRow>();
-	return buildCapabilityMap(rows.results ?? [], cutoff);
+	return buildCapabilityMap(rows.results ?? []);
 }
 
 export async function listVerifiedModelEntries(
 	db: D1Database,
 	channels: Array<{ id: string; name: string }>,
-	ttlSeconds: number = DEFAULT_MODEL_CAPABILITY_TTL_SEC,
 ): Promise<ModelEntry[]> {
 	const ids = channels.map((channel) => channel.id);
 	const nameMap = new Map(channels.map((channel) => [channel.id, channel.name]));
-	const map = await listVerifiedModelsByChannel(db, ids, ttlSeconds);
+	const map = await listVerifiedModelsByChannel(db, ids);
 	const entries: ModelEntry[] = [];
 	for (const [channelId, models] of map.entries()) {
 		const channelName = nameMap.get(channelId) ?? channelId;
@@ -71,10 +66,9 @@ export async function listVerifiedModelEntries(
 export async function listModelsByChannelWithFallback(
 	db: D1Database,
 	channels: Array<{ id: string; name: string; models_json?: string | null }>,
-	ttlSeconds: number = DEFAULT_MODEL_CAPABILITY_TTL_SEC,
 ): Promise<Map<string, Set<string>>> {
 	const ids = channels.map((channel) => channel.id);
-	const verified = await listVerifiedModelsByChannel(db, ids, ttlSeconds);
+	const verified = await listVerifiedModelsByChannel(db, ids);
 	const map = new Map<string, Set<string>>();
 	for (const channel of channels) {
 		const verifiedModels = verified.get(channel.id);
@@ -93,9 +87,8 @@ export async function listModelsByChannelWithFallback(
 export async function listModelEntriesWithFallback(
 	db: D1Database,
 	channels: Array<{ id: string; name: string; models_json?: string | null }>,
-	ttlSeconds: number = DEFAULT_MODEL_CAPABILITY_TTL_SEC,
 ): Promise<ModelEntry[]> {
-	const map = await listModelsByChannelWithFallback(db, channels, ttlSeconds);
+	const map = await listModelsByChannelWithFallback(db, channels);
 	const entries: ModelEntry[] = [];
 	for (const channel of channels) {
 		const models = map.get(channel.id);
@@ -114,6 +107,7 @@ export async function listCoolingDownChannelsForModel(
 	channelIds: string[],
 	model: string | null,
 	cooldownSeconds: number,
+	minErrorCount: number = 1,
 ): Promise<Set<string>> {
 	if (!model || channelIds.length === 0 || cooldownSeconds <= 0) {
 		return new Set();
@@ -123,15 +117,21 @@ export async function listCoolingDownChannelsForModel(
 	const placeholders = channelIds.map(() => "?").join(", ");
 	const rows = await db
 		.prepare(
-			`SELECT channel_id, last_err_at, last_ok_at FROM channel_model_capabilities WHERE model = ? AND channel_id IN (${placeholders}) AND last_err_at IS NOT NULL AND last_err_at >= ?`,
+			`SELECT channel_id, last_err_at, last_ok_at, last_err_count FROM channel_model_capabilities WHERE model = ? AND channel_id IN (${placeholders}) AND last_err_at IS NOT NULL AND last_err_at >= ?`,
 		)
 		.bind(model, ...channelIds, cutoff)
-		.all<{ channel_id: string; last_err_at: number | null; last_ok_at: number | null }>();
+		.all<{
+			channel_id: string;
+			last_err_at: number | null;
+			last_ok_at: number | null;
+			last_err_count?: number | null;
+		}>();
 	const blocked = new Set<string>();
 	for (const row of rows.results ?? []) {
 		const lastErr = Number(row.last_err_at ?? 0);
 		const lastOk = Number(row.last_ok_at ?? 0);
-		if (lastErr && lastErr >= lastOk) {
+		const errCount = Number(row.last_err_count ?? 0);
+		if (lastErr && lastErr >= lastOk && errCount >= minErrorCount) {
 			blocked.add(row.channel_id);
 		}
 	}
@@ -151,9 +151,16 @@ export async function recordChannelModelError(
 	const timestamp = nowIso();
 	await db
 		.prepare(
-			"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, created_at, updated_at) VALUES (?, ?, 0, ?, ?, ?, ?) ON CONFLICT(channel_id, model) DO UPDATE SET last_err_at = excluded.last_err_at, last_err_code = excluded.last_err_code, updated_at = excluded.updated_at",
+			"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, last_err_count, created_at, updated_at) VALUES (?, ?, 0, ?, ?, 1, ?, ?) ON CONFLICT(channel_id, model) DO UPDATE SET last_err_at = excluded.last_err_at, last_err_code = excluded.last_err_code, last_err_count = COALESCE(channel_model_capabilities.last_err_count, 0) + 1, updated_at = excluded.updated_at",
 		)
-		.bind(channelId, model, nowSeconds, errorCode, timestamp, timestamp)
+		.bind(
+			channelId,
+			model,
+			nowSeconds,
+			errorCode,
+			timestamp,
+			timestamp,
+		)
 		.run();
 }
 
@@ -168,7 +175,7 @@ export async function upsertChannelModelCapabilities(
 	}
 	const timestamp = nowIso();
 	const stmt = db.prepare(
-		"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, ?, ?) ON CONFLICT(channel_id, model) DO UPDATE SET last_ok_at = excluded.last_ok_at, last_err_at = NULL, last_err_code = NULL, updated_at = excluded.updated_at",
+		"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, last_err_count, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, 0, ?, ?) ON CONFLICT(channel_id, model) DO UPDATE SET last_ok_at = excluded.last_ok_at, last_err_at = NULL, last_err_code = NULL, last_err_count = 0, updated_at = excluded.updated_at",
 	);
 	const statements = models.map((model) =>
 		stmt.bind(channelId, model, nowSeconds, timestamp, timestamp),

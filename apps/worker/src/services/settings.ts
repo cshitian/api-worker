@@ -4,13 +4,11 @@ import { nowIso } from "../utils/time";
 const DEFAULT_LOG_RETENTION_DAYS = 30;
 const DEFAULT_SESSION_TTL_HOURS = 12;
 const DEFAULT_CHECKIN_SCHEDULE_TIME = "00:10";
-const DEFAULT_MODEL_CAPABILITY_TTL_HOURS = 2;
 const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 10;
 const RETENTION_KEY = "log_retention_days";
 const SESSION_TTL_KEY = "session_ttl_hours";
 const ADMIN_PASSWORD_HASH_KEY = "admin_password_hash";
 const CHECKIN_SCHEDULE_TIME_KEY = "checkin_schedule_time";
-const MODEL_CAPABILITY_TTL_KEY = "model_capability_ttl_hours";
 const MODEL_FAILURE_COOLDOWN_KEY = "model_failure_cooldown_minutes";
 
 async function readSetting(
@@ -128,21 +126,6 @@ export async function setCheckinScheduleTime(
 	time: string,
 ): Promise<void> {
 	await upsertSetting(db, CHECKIN_SCHEDULE_TIME_KEY, time);
-}
-
-export async function getModelCapabilityTtlHours(
-	db: D1Database,
-): Promise<number> {
-	const value = await readSetting(db, MODEL_CAPABILITY_TTL_KEY);
-	return parsePositiveNumber(value, DEFAULT_MODEL_CAPABILITY_TTL_HOURS);
-}
-
-export async function setModelCapabilityTtlHours(
-	db: D1Database,
-	hours: number,
-): Promise<void> {
-	const value = Math.max(1, Math.floor(hours)).toString();
-	await upsertSetting(db, MODEL_CAPABILITY_TTL_KEY, value);
 }
 
 export async function getModelFailureCooldownMinutes(

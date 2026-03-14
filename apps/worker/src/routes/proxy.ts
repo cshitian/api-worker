@@ -3,7 +3,6 @@ import type { AppEnv } from "../env";
 import { type TokenRecord, tokenAuth } from "../middleware/tokenAuth";
 import {
 	type CallTokenItem,
-	selectCallToken,
 } from "../services/call-token-selector";
 import { listCallTokens } from "../services/channel-call-token-repo";
 import {
@@ -24,7 +23,6 @@ import {
 	upsertChannelModelCapabilities,
 } from "../services/channel-model-capabilities";
 import {
-	getModelCapabilityTtlHours,
 	getModelFailureCooldownMinutes,
 } from "../services/settings";
 import {
@@ -80,7 +78,9 @@ type ErrorDetails = {
 	errorMessage: string | null;
 };
 
-function truncateMessage(value: string | null, max = 240): string | null {
+const FAILURE_COUNT_THRESHOLD = 2;
+
+function normalizeMessage(value: string | null): string | null {
 	if (!value) {
 		return null;
 	}
@@ -88,7 +88,7 @@ function truncateMessage(value: string | null, max = 240): string | null {
 	if (!trimmed) {
 		return null;
 	}
-	return trimmed.length > max ? `${trimmed.slice(0, max)}...` : trimmed;
+	return trimmed;
 }
 
 async function extractErrorDetails(
@@ -114,12 +114,28 @@ async function extractErrorDetails(
 						: null;
 			return {
 				errorCode,
-				errorMessage: truncateMessage(errorMessage),
+				errorMessage: normalizeMessage(errorMessage),
 			};
 		}
 	}
 	const text = await response.clone().text().catch(() => "");
-	return { errorCode: null, errorMessage: truncateMessage(text) };
+	return { errorCode: null, errorMessage: normalizeMessage(text) };
+}
+
+export function shouldCooldown(
+	upstreamStatus: number | null,
+	errorCode: string | null,
+): boolean {
+	if (errorCode === "timeout" || errorCode === "exception") {
+		return true;
+	}
+	if (upstreamStatus === 429 || upstreamStatus === 408) {
+		return true;
+	}
+	if (upstreamStatus !== null && upstreamStatus >= 500) {
+		return true;
+	}
+	return false;
 }
 
 function channelSupportsModel(
@@ -134,37 +150,46 @@ function channelSupportsModel(
 	const declaredModels = extractModels(channel).map((entry) => entry.id);
 	const metadata = parseChannelMetadata(channel.metadata_json);
 	const mapped = resolveMappedModel(metadata.model_mapping, model);
+	const hasExplicitMapping = hasExplicitModelMapping(metadata, model);
 	const declaredAllows =
-		declaredModels.length === 0
-			? true
-			: (mapped ? declaredModels.includes(mapped) : false) ||
-				declaredModels.includes(model);
-	if (!declaredAllows) {
+		declaredModels.length > 0
+			? (mapped ? declaredModels.includes(mapped) : false) ||
+				declaredModels.includes(model)
+			: null;
+	const verifiedAllows =
+		verified && verified.size > 0
+			? (mapped ? verified.has(mapped) : false) || verified.has(model)
+			: null;
+	if (hasExplicitMapping) {
+		if (verified && verified.size > 0) {
+			return Boolean(verifiedAllows);
+		}
+		if (declaredModels.length > 0) {
+			return Boolean(declaredAllows);
+		}
+		return true;
+	}
+	if (declaredModels.length > 0 && !declaredAllows) {
 		return false;
 	}
 	if (verified && verified.size > 0) {
-		if (mapped && verified.has(mapped)) {
-			return true;
-		}
-		return verified.has(model);
+		return Boolean(verifiedAllows);
 	}
-	return true;
+	if (declaredModels.length > 0) {
+		return true;
+	}
+	return false;
 }
 
 export function selectCandidateChannels(
 	allowedChannels: ChannelRecord[],
 	downstreamModel: string | null,
-	verifiedModelsByChannel: Map<string, Set<string>>,
+	verifiedModelsByChannel: Map<string, Set<string>> = new Map(),
 ): ChannelRecord[] {
 	const modelChannels = allowedChannels.filter((channel) =>
 		channelSupportsModel(channel, downstreamModel, verifiedModelsByChannel),
 	);
-	if (modelChannels.length > 0) {
-		return modelChannels;
-	}
-	// Fallback to all allowed channels. Downstream protocol should not restrict
-	// upstream channel selection.
-	return allowedChannels;
+	return modelChannels;
 }
 
 function hasExplicitModelMapping(
@@ -184,7 +209,7 @@ export function resolveUpstreamModelForChannel(
 	channel: ChannelRecord,
 	metadata: ChannelMetadata,
 	downstreamModel: string | null,
-	verifiedModelsByChannel: Map<string, Set<string>>,
+	verifiedModelsByChannel: Map<string, Set<string>> = new Map(),
 ): { model: string | null; autoMapped: boolean } {
 	const mapped = resolveMappedModel(metadata.model_mapping, downstreamModel);
 	if (!downstreamModel || hasExplicitModelMapping(metadata, downstreamModel)) {
@@ -218,6 +243,36 @@ function filterAllowedChannels(
 	const allowedSet = new Set(allowed);
 	return channels.filter((channel) => allowedSet.has(channel.id));
 }
+
+const normalizeTokenModels = (raw?: string | null): string[] | null => {
+	const parsed = safeJsonParse<string[] | null>(raw ?? null, null);
+	if (!parsed || !Array.isArray(parsed) || parsed.length === 0) {
+		return null;
+	}
+	return parsed.map((item) => String(item));
+};
+
+const selectTokenForModel = (
+	tokens: CallTokenItem[],
+	model: string | null,
+): { token: CallTokenItem | null; hasModelList: boolean } => {
+	if (tokens.length === 0) {
+		return { token: null, hasModelList: false };
+	}
+	if (!model) {
+		return { token: tokens[0], hasModelList: false };
+	}
+	const tokensWithModels = tokens.map((token) => ({
+		token,
+		models: normalizeTokenModels(token.models_json),
+	}));
+	const hasModelList = tokensWithModels.some((entry) => entry.models);
+	if (!hasModelList) {
+		return { token: tokens[0], hasModelList: false };
+	}
+	const match = tokensWithModels.find((entry) => entry.models?.includes(model));
+	return { token: match?.token ?? null, hasModelList };
+};
 
 function resolveChannelBaseUrl(channel: ChannelRecord): string {
 	return normalizeBaseUrl(channel.base_url);
@@ -297,6 +352,7 @@ async function fetchWithTimeout(
  */
 proxy.all("/*", tokenAuth, async (c) => {
 	const tokenRecord = c.get("tokenRecord") as TokenRecord;
+	const requestStart = Date.now();
 	let requestText = await c.req.text();
 	const parsedBody = requestText
 		? safeJsonParse<Record<string, unknown> | null>(requestText, null)
@@ -361,6 +417,33 @@ proxy.all("/*", tokenAuth, async (c) => {
 		);
 	}
 
+	const recordEarlyUsage = (options: {
+		status: number;
+		code: string;
+		message?: string | null;
+	}) => {
+		const latencyMs = Date.now() - requestStart;
+		const errorMessage = options.message ?? options.code;
+		scheduleDbWrite(
+			c,
+			recordUsage(c.env.DB, {
+				tokenId: tokenRecord.id,
+				channelId: null,
+				model: downstreamModel,
+				requestPath: c.req.path,
+				totalTokens: 0,
+				latencyMs,
+				firstTokenLatencyMs: isStream ? null : latencyMs,
+				stream: isStream,
+				reasoningEffort,
+				status: "error",
+				upstreamStatus: options.status,
+				errorCode: options.code,
+				errorMessage,
+			}),
+		);
+	};
+
 	const channelResult = await c.env.DB.prepare(
 		"SELECT * FROM channels WHERE status = ?",
 	)
@@ -377,18 +460,16 @@ proxy.all("/*", tokenAuth, async (c) => {
 			channel_id: row.channel_id,
 			name: row.name,
 			api_key: row.api_key,
+			models_json: row.models_json ?? null,
 		};
 		const list = callTokenMap.get(row.channel_id) ?? [];
 		list.push(entry);
 		callTokenMap.set(row.channel_id, list);
 	}
 	const allowedChannels = filterAllowedChannels(activeChannels, tokenRecord);
-	const ttlHours = await getModelCapabilityTtlHours(c.env.DB);
-	const ttlSeconds = Math.max(1, Math.floor(ttlHours)) * 60 * 60;
 	const verifiedModelsByChannel = await listVerifiedModelsByChannel(
 		c.env.DB,
 		allowedChannels.map((channel) => channel.id),
-		ttlSeconds,
 	);
 	let candidates = selectCandidateChannels(
 		allowedChannels,
@@ -403,6 +484,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			candidates.map((channel) => channel.id),
 			downstreamModel,
 			cooldownSeconds,
+			FAILURE_COUNT_THRESHOLD,
 		);
 		if (coolingChannels.size > 0) {
 			candidates = candidates.filter(
@@ -414,6 +496,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 					model: downstreamModel,
 					cooldown_minutes: cooldownMinutes,
 					blocked_channels: coolingChannels.size,
+				});
+				recordEarlyUsage({
+					status: 503,
+					code: "upstream_cooldown",
+					message: "upstream_cooldown",
 				});
 				return jsonError(
 					c,
@@ -434,6 +521,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 		});
 	}
 	if (candidates.length === 0) {
+		recordEarlyUsage({
+			status: 503,
+			code: "no_available_channels",
+			message: "no_available_channels",
+		});
 		return jsonError(c, 503, "no_available_channels", "no_available_channels");
 	}
 	const targetPath = c.req.path;
@@ -451,7 +543,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 	let lastChannel: ChannelRecord | null = null;
 	let lastRequestPath = targetPath;
 	let lastErrorDetails: ErrorDetails | null = null;
-	const start = Date.now();
 	let selectedChannel: ChannelRecord | null = null;
 	let selectedUpstreamProvider: ProviderType | null = null;
 	let selectedUpstreamModel: string | null = null;
@@ -476,8 +567,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 		}
 		const baseUrl = resolveChannelBaseUrl(channel);
 		const tokens = callTokenMap.get(channel.id) ?? [];
-		const selectedToken = tokens.length > 0 ? selectCallToken(tokens) : null;
-		const apiKey = selectedToken?.api_key ?? channel.api_key;
+		const selection = selectTokenForModel(tokens, recordModel);
+		if (!selection.token && selection.hasModelList && recordModel) {
+			continue;
+		}
+		const apiKey = selection.token?.api_key ?? channel.api_key;
 		const headers = buildUpstreamHeaders(
 			new Headers(c.req.header()),
 			upstreamProvider,
@@ -588,6 +682,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 			} | null = null;
 			if (endpointType === "chat" || endpointType === "responses") {
 				if (!normalizedChat) {
+					recordEarlyUsage({
+						status: 400,
+						code: "invalid_body",
+						message: "invalid_body",
+					});
 					return jsonError(c, 400, "invalid_body", "invalid_body");
 				}
 				const request = buildUpstreamChatRequest(
@@ -607,6 +706,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 				};
 			} else if (endpointType === "embeddings") {
 				if (!normalizedEmbedding) {
+					recordEarlyUsage({
+						status: 400,
+						code: "invalid_body",
+						message: "invalid_body",
+					});
 					return jsonError(c, 400, "invalid_body", "invalid_body");
 				}
 				const request = buildUpstreamEmbeddingRequest(
@@ -624,6 +728,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 				};
 			} else if (endpointType === "images") {
 				if (!normalizedImage) {
+					recordEarlyUsage({
+						status: 400,
+						code: "invalid_body",
+						message: "invalid_body",
+					});
 					return jsonError(c, 400, "invalid_body", "invalid_body");
 				}
 				const request = buildUpstreamImageRequest(
@@ -718,13 +827,34 @@ proxy.all("/*", tokenAuth, async (c) => {
 				errorCode: errorInfo.errorCode,
 				errorMessage: errorInfo.errorMessage,
 			};
-			if (recordModel) {
+			const cooldownEligible = shouldCooldown(
+				response.status,
+				errorInfo.errorCode,
+			);
+			if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
 				scheduleDbWrite(
 					c,
 					recordChannelModelError(
 						c.env.DB,
 						channel.id,
 						recordModel,
+						String(response.status),
+						nowSeconds,
+					),
+				);
+			}
+			if (
+				downstreamModel &&
+				downstreamModel !== recordModel &&
+				cooldownSeconds > 0 &&
+				cooldownEligible
+			) {
+				scheduleDbWrite(
+					c,
+					recordChannelModelError(
+						c.env.DB,
+						channel.id,
+						downstreamModel,
 						String(response.status),
 						nowSeconds,
 					),
@@ -747,11 +877,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 			lastErrorDetails = {
 				upstreamStatus: null,
 				errorCode: isTimeout ? "timeout" : "exception",
-				errorMessage: truncateMessage(
+				errorMessage: normalizeMessage(
 					error instanceof Error ? error.message : String(error),
 				),
 			};
-			if (recordModel) {
+			const cooldownEligible = shouldCooldown(
+				null,
+				isTimeout ? "timeout" : "exception",
+			);
+			if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
 				scheduleDbWrite(
 					c,
 					recordChannelModelError(
@@ -763,11 +897,28 @@ proxy.all("/*", tokenAuth, async (c) => {
 					),
 				);
 			}
+			if (
+				downstreamModel &&
+				downstreamModel !== recordModel &&
+				cooldownSeconds > 0 &&
+				cooldownEligible
+			) {
+				scheduleDbWrite(
+					c,
+					recordChannelModelError(
+						c.env.DB,
+						channel.id,
+						downstreamModel,
+						isTimeout ? "timeout" : "exception",
+						nowSeconds,
+					),
+				);
+			}
 			lastResponse = null;
 		}
 	}
 
-	const latencyMs = Date.now() - start;
+	const latencyMs = Date.now() - requestStart;
 	if (!selectedChannel && lastResponse && !lastResponse.ok) {
 		console.warn("[proxy:upstream_exhausted]", {
 			path: targetPath,
@@ -838,7 +989,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 				reasoningEffort,
 				status: lastResponse.ok ? "ok" : "error",
 				upstreamStatus: lastResponse.ok
-					? null
+					? lastResponse.status
 					: errorDetails?.upstreamStatus ?? lastResponse.status,
 				errorCode: lastResponse.ok ? null : errorDetails?.errorCode ?? null,
 				errorMessage: lastResponse.ok
