@@ -20,6 +20,7 @@ const DEFAULT_CACHE_CHANNELS_TTL_SECONDS = 15;
 const DEFAULT_CACHE_CALL_TOKENS_TTL_SECONDS = 15;
 const DEFAULT_CACHE_SETTINGS_TTL_SECONDS = 30;
 const DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS = 30000;
+const DEFAULT_PROXY_USAGE_QUEUE_ENABLED = true;
 const DEFAULT_USAGE_QUEUE_DAILY_LIMIT = 10000;
 const DEFAULT_USAGE_QUEUE_DIRECT_WRITE_RATIO = 0.5;
 const CACHE_CONFIG_TTL_MS = 1000;
@@ -180,35 +181,6 @@ function parsePositiveNumber(value: string | null, fallback: number): number {
 	const parsed = Number(value);
 	if (!Number.isNaN(parsed) && parsed > 0) {
 		return parsed;
-	}
-	return fallback;
-}
-
-function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
-	if (value === undefined || value === null) {
-		return fallback;
-	}
-	return parseBooleanSetting(value, fallback);
-}
-
-function parsePositiveEnv(value: string | undefined, fallback: number): number {
-	if (value === undefined || value === null || value === "") {
-		return fallback;
-	}
-	const parsed = Number(value);
-	if (!Number.isNaN(parsed) && parsed > 0) {
-		return Math.floor(parsed);
-	}
-	return fallback;
-}
-
-function parseNonNegativeInt(value: string | undefined, fallback: number): number {
-	if (value === undefined || value === null || value === "") {
-		return fallback;
-	}
-	const parsed = Number(value);
-	if (!Number.isNaN(parsed) && parsed >= 0) {
-		return Math.floor(parsed);
 	}
 	return fallback;
 }
@@ -381,33 +353,26 @@ export async function getSettingsSnapshot(
 
 export async function getProxyRuntimeSettings(
 	db: D1Database,
-	env: Bindings,
 ): Promise<ProxyRuntimeSettings> {
 	const settings = await getSettingsSnapshot(db);
 	const upstreamTimeout = parsePositiveSetting(
 		settings[PROXY_UPSTREAM_TIMEOUT_KEY] ?? null,
-		parsePositiveEnv(env.PROXY_UPSTREAM_TIMEOUT_MS, DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS),
+		DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS,
 	);
 	const streamUsageMode = normalizeStreamUsageMode(
-		settings[PROXY_STREAM_USAGE_MODE_KEY] ?? env.PROXY_STREAM_USAGE_MODE,
+		settings[PROXY_STREAM_USAGE_MODE_KEY],
 	);
 	const streamUsageMaxBytes = parseNonNegativeSetting(
 		settings[PROXY_STREAM_USAGE_MAX_BYTES_KEY] ?? null,
-		parseNonNegativeInt(
-			env.PROXY_STREAM_USAGE_MAX_BYTES,
-			DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES,
-		),
+		DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES,
 	);
 	const streamUsageMaxParsers = parseNonNegativeSetting(
 		settings[PROXY_STREAM_USAGE_MAX_PARSERS_KEY] ?? null,
-		parseNonNegativeInt(
-			env.PROXY_STREAM_USAGE_MAX_PARSERS,
-			DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS,
-		),
+		DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS,
 	);
 	const usageQueueEnabled = parseBooleanSetting(
 		settings[PROXY_USAGE_QUEUE_ENABLED_KEY] ?? null,
-		parseBooleanEnv(env.PROXY_USAGE_QUEUE_ENABLED, true),
+		DEFAULT_PROXY_USAGE_QUEUE_ENABLED,
 	);
 	const usageQueueDailyLimit = parseNonNegativeSetting(
 		settings[USAGE_QUEUE_DAILY_LIMIT_KEY] ?? null,

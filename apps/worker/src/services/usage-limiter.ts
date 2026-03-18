@@ -1,6 +1,7 @@
 import type {
 	DurableObjectNamespace,
 	DurableObjectState,
+	DurableObjectStub,
 } from "@cloudflare/workers-types";
 import { beijingDateString } from "../utils/time";
 
@@ -16,11 +17,17 @@ export type UsageLimiterReserveResult = {
 	date: string;
 };
 
+export type UsageLimiterStatus = {
+	ok: boolean;
+	date: string;
+	count: number;
+};
+
 export const getUsageLimiterStub = (namespace: DurableObjectNamespace) =>
 	namespace.get(namespace.idFromName(LIMITER_NAME));
 
 export async function reserveUsageQueue(
-	stub: { fetch: (input: RequestInfo, init?: RequestInit) => Promise<Response> },
+	stub: DurableObjectStub,
 	options: { limit: number; amount?: number },
 ): Promise<UsageLimiterReserveResult> {
 	const limit = Math.max(0, Math.floor(options.limit));
@@ -33,6 +40,17 @@ export async function reserveUsageQueue(
 		throw new Error(`usage_limiter_failed:${response.status}`);
 	}
 	const payload = (await response.json()) as UsageLimiterReserveResult;
+	return payload;
+}
+
+export async function getUsageQueueStatus(
+	stub: DurableObjectStub,
+): Promise<UsageLimiterStatus> {
+	const response = await stub.fetch("https://usage-limiter/status");
+	if (!response.ok) {
+		throw new Error(`usage_limiter_status_failed:${response.status}`);
+	}
+	const payload = (await response.json()) as UsageLimiterStatus;
 	return payload;
 }
 

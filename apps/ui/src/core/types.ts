@@ -125,6 +125,7 @@ export type Settings = {
 	runtime_settings?: RuntimeProxySettings;
 	runtime_config?: RuntimeProxyConfig;
 	cache_config?: CacheConfig;
+	usage_queue_status?: UsageQueueStatus | null;
 };
 
 export type RuntimeProxySettings = {
@@ -158,6 +159,15 @@ export type CacheConfig = {
 	version_channels: number;
 	version_call_tokens: number;
 	version_settings: number;
+};
+
+export type UsageQueueStatus = {
+	count: number | null;
+	date: string | null;
+	limit: number;
+	enabled: boolean;
+	bound: boolean;
+	active: boolean;
 };
 
 export type ModelChannel = {

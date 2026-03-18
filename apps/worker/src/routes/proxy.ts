@@ -457,7 +457,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 	const requestStart = Date.now();
 	const [cacheConfig, runtimeSettings] = await Promise.all([
 		getCacheConfig(c.env.DB),
-		getProxyRuntimeSettings(c.env.DB, c.env),
+		getProxyRuntimeSettings(c.env.DB),
 	]);
 	const scheduleUsageEvent = createUsageEventScheduler(c, runtimeSettings);
 	let requestText = await c.req.text();

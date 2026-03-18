@@ -86,7 +86,7 @@ bun run dev:worker
 - 日志保留天数（默认 30）
 - 会话时长（小时，默认 12）
 - 管理员密码（首次登录在登录页输入密码将自动设置，可在系统设置中修改）
-- 运行时配置（只读，来自环境变量）：`PROXY_STREAM_USAGE_MODE`、`PROXY_STREAM_USAGE_MAX_BYTES`、`PROXY_STREAM_USAGE_MAX_PARSERS`、`PROXY_USAGE_QUEUE_ENABLED`（需在部署环境中修改）
+- 运行时配置（以数据库为准，可在系统设置中修改）
 
 ### 3) 启动管理台 UI
 

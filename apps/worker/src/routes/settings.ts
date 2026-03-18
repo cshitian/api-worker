@@ -22,6 +22,10 @@ import {
 	setModelFailureCooldownMinutes,
 	setProxyRuntimeSettings,
 } from "../services/settings";
+import {
+	getUsageLimiterStub,
+	getUsageQueueStatus,
+} from "../services/usage-limiter";
 import { sha256Hex } from "../utils/crypto";
 import { jsonError } from "../utils/http";
 
@@ -38,9 +42,45 @@ settings.get("/", async (c) => {
 	const modelFailureCooldownMinutes = await getModelFailureCooldownMinutes(
 		c.env.DB,
 	);
-	const runtimeSettings = await getProxyRuntimeSettings(c.env.DB, c.env);
+	const runtimeSettings = await getProxyRuntimeSettings(c.env.DB);
 	const runtimeConfig = getRuntimeProxyConfig(c.env, runtimeSettings);
 	const cacheConfig = await getCacheConfig(c.env.DB);
+	let usageQueueStatus: {
+		count: number | null;
+		date: string | null;
+		limit: number;
+		enabled: boolean;
+		bound: boolean;
+		active: boolean;
+	} | null = null;
+	if (c.env.USAGE_LIMITER) {
+		try {
+			const status = await getUsageQueueStatus(
+				getUsageLimiterStub(c.env.USAGE_LIMITER),
+			);
+			usageQueueStatus = {
+				count: status.count,
+				date: status.date,
+				limit: runtimeSettings.usage_queue_daily_limit,
+				enabled: runtimeSettings.usage_queue_enabled,
+				bound: runtimeConfig.usage_queue_bound,
+				active: runtimeConfig.usage_queue_active,
+			};
+		} catch (error) {
+			console.warn("[settings:usage_queue_status_failed]", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	} else {
+		usageQueueStatus = {
+			count: null,
+			date: null,
+			limit: runtimeSettings.usage_queue_daily_limit,
+			enabled: runtimeSettings.usage_queue_enabled,
+			bound: runtimeConfig.usage_queue_bound,
+			active: runtimeConfig.usage_queue_active,
+		};
+	}
 	return c.json({
 		log_retention_days: retention,
 		session_ttl_hours: sessionTtlHours,
@@ -50,6 +90,7 @@ settings.get("/", async (c) => {
 		runtime_config: runtimeConfig,
 		runtime_settings: runtimeSettings,
 		cache_config: cacheConfig,
+		usage_queue_status: usageQueueStatus,
 	});
 });
 

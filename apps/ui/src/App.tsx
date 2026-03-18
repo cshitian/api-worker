@@ -1902,6 +1902,7 @@ const App = () => {
 						buildActionKey("settings:cache:refresh"),
 					)}
 					runtimeConfig={data.settings?.runtime_config ?? null}
+					usageQueueStatus={data.settings?.usage_queue_status ?? null}
 					isSaving={isActionPending(buildActionKey("settings:submit"))}
 					onSubmit={handleSettingsSubmit}
 					onFormChange={handleSettingsFormChange}

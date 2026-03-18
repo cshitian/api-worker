@@ -9,6 +9,12 @@
 
 ### 变更
 
+- **[settings/admin-ui]**: 设置页分区重排并内联队列状态与使用数量 — by lsy
+  - 方案: [202603181300_settings-panel-sections](archive/2026-03/202603181300_settings-panel-sections/)
+  - 决策: settings-panel-sections#D001(只读项内联展示)
+- **[settings/admin-ui]**: 运行时设置改为仅数据库生效，移除环境变量回退 — by lsy
+  - 方案: [202603181221_settings-db-only](archive/2026-03/202603181221_settings-db-only/)
+  - 决策: settings-db-only#D001(停用环境变量回退)
 - **[settings/proxy/usage/admin-ui]**: 运行时设置可在后台配置，新增队列日限额与直写比例并接入 UsageLimiter — by lsy
   - 方案: [202603180031_usage-queue-simplified](archive/2026-03/202603180031_usage-queue-simplified/)
 - **[cache/settings/proxy/usage/admin-ui]**: 引入分组缓存与自动失效，面板/日志/模型短期缓存可配置，清理节流并补齐索引 — by lsy
@@ -221,6 +227,12 @@
 
 ### 快速修改
 
+- **[admin-ui/settings]**: 缓存 TTL 与版本成对展示为卡片 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: apps/ui/src/features/SettingsView.tsx:417-632
+- **[admin-ui/settings]**: 缓存版本调整为小标题展示 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: apps/ui/src/features/SettingsView.tsx:566-584
 - **[ci]**: 队列创建失败时识别“名称已占用(11009)”并视为已存在 — by lsy
   - 类型: 快速修改（无方案包）
   - 文件: .github/workflows/deploy.yml:263-320,416-473
