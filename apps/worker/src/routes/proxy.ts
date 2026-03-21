@@ -38,11 +38,7 @@ import {
 	parseDownstreamStream,
 } from "../services/provider-transform";
 import { recordRuntimeEvent } from "../services/runtime-events";
-import {
-	getCacheConfig,
-	getModelFailureCooldownMinutes,
-	getProxyRuntimeSettings,
-} from "../services/settings";
+import { getCacheConfig, getProxyRuntimeSettings } from "../services/settings";
 import {
 	getUsageLimiterStub,
 	reserveUsageQueue,
@@ -99,7 +95,6 @@ const PROXY_UPSTREAM_TIMEOUT_ERROR_CODE = "proxy_upstream_timeout";
 const PROXY_UPSTREAM_FETCH_ERROR_CODE = "proxy_upstream_fetch_exception";
 const INTERNAL_USAGE_RESERVE_TIMEOUT_MS = 600;
 const INTERNAL_USAGE_QUEUE_SEND_TIMEOUT_MS = 1500;
-const INTERNAL_COOLDOWN_FAILURE_THRESHOLD = 2;
 const INTERNAL_COOLDOWN_HTTP_STATUSES = [408, 429];
 const INTERNAL_COOLDOWN_MIN_STATUS = 500;
 const INTERNAL_COOLDOWN_ERROR_CODES = [
@@ -346,7 +341,9 @@ function createUsageEventScheduler(
 			| "allowed";
 	};
 
-	const shouldUseQueue = async (dispatchKey: string): Promise<QueueDecision> => {
+	const shouldUseQueue = async (
+		dispatchKey: string,
+	): Promise<QueueDecision> => {
 		if (!queueEnabled) {
 			return {
 				useQueue: false,
@@ -961,11 +958,14 @@ proxy.all("/*", tokenAuth, async (c) => {
 		downstreamModel,
 		verifiedModelsByChannel,
 	);
-	const cooldownMinutes = await getModelFailureCooldownMinutes(c.env.DB);
-	const cooldownSeconds = Math.max(0, Math.floor(cooldownMinutes)) * 60;
+	const cooldownMinutes = Math.max(
+		0,
+		Math.floor(runtimeSettings.model_failure_cooldown_minutes),
+	);
+	const cooldownSeconds = cooldownMinutes * 60;
 	const cooldownFailureThreshold = Math.max(
 		1,
-		Math.floor(INTERNAL_COOLDOWN_FAILURE_THRESHOLD),
+		Math.floor(runtimeSettings.model_failure_cooldown_threshold),
 	);
 	const usageErrorMessageMaxLength = Math.max(
 		1,
@@ -996,6 +996,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 						path: c.req.path,
 						model: downstreamModel,
 						cooldown_minutes: cooldownMinutes,
+						cooldown_threshold: cooldownFailureThreshold,
 						blocked_channels: coolingChannels.size,
 					},
 				);

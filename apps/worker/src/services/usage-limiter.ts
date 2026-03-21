@@ -119,15 +119,18 @@ export class UsageLimiter {
 				(await this.state.storage.get<number>(RESERVED_COUNT_KEY)) ?? 0,
 			enqueueSuccessCount:
 				(await this.state.storage.get<number>(ENQUEUE_SUCCESS_COUNT_KEY)) ?? 0,
-			directCount: (await this.state.storage.get<number>(DIRECT_COUNT_KEY)) ?? 0,
+			directCount:
+				(await this.state.storage.get<number>(DIRECT_COUNT_KEY)) ?? 0,
 			fallbackDirectCount:
 				(await this.state.storage.get<number>(FALLBACK_DIRECT_COUNT_KEY)) ?? 0,
 			reserveFailedCount:
 				(await this.state.storage.get<number>(RESERVE_FAILED_COUNT_KEY)) ?? 0,
 			reserveOverLimitCount:
-				(await this.state.storage.get<number>(RESERVE_OVER_LIMIT_COUNT_KEY)) ?? 0,
+				(await this.state.storage.get<number>(RESERVE_OVER_LIMIT_COUNT_KEY)) ??
+				0,
 			queueSendFailedCount:
-				(await this.state.storage.get<number>(QUEUE_SEND_FAILED_COUNT_KEY)) ?? 0,
+				(await this.state.storage.get<number>(QUEUE_SEND_FAILED_COUNT_KEY)) ??
+				0,
 		};
 		if (storedDate !== nowDate) {
 			storedDate = nowDate;

@@ -253,30 +253,7 @@ export const SettingsView = ({
 								}}
 							/>
 						</div>
-						<div class="app-settings-row">
-							<div class="app-settings-row__main">
-								<label class="app-settings-row__label" for="failure-cooldown">
-									失败冷却（分钟）
-								</label>
-								<p class="app-settings-row__hint">
-									同一模型失败后在该时间内跳过对应渠道，0 表示关闭冷却。
-								</p>
-							</div>
-							<Input
-								class="app-settings-row__control app-settings-row__control--compact"
-								id="failure-cooldown"
-								name="model_failure_cooldown_minutes"
-								type="number"
-								min="0"
-								value={settingsForm.model_failure_cooldown_minutes}
-								onInput={(event) => {
-									const target = event.currentTarget as HTMLInputElement | null;
-									onFormChange({
-										model_failure_cooldown_minutes: target?.value ?? "",
-									});
-								}}
-							/>
-						</div>
+
 						<div class="app-settings-row app-settings-row--stack">
 							<div class="app-settings-row__main">
 								<label class="app-settings-row__label" for="admin-password">
@@ -358,6 +335,62 @@ export const SettingsView = ({
 									const target = event.currentTarget as HTMLInputElement | null;
 									onFormChange({
 										proxy_retry_max_retries: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-model-failure-cooldown"
+								>
+									失败冷却时长（分钟）
+								</label>
+								<p class="app-settings-row__hint">
+									同一模型连续失败达到阈值后，在该时长内跳过对应渠道；0
+									表示关闭冷却。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-model-failure-cooldown"
+								name="proxy_model_failure_cooldown_minutes"
+								type="number"
+								min="0"
+								value={settingsForm.proxy_model_failure_cooldown_minutes}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_model_failure_cooldown_minutes: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-model-failure-threshold"
+								>
+									连续失败次数阈值
+								</label>
+								<p class="app-settings-row__hint">
+									达到该次数才进入冷却，最小为 1。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-model-failure-threshold"
+								name="proxy_model_failure_cooldown_threshold"
+								type="number"
+								min="1"
+								step="1"
+								value={settingsForm.proxy_model_failure_cooldown_threshold}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_model_failure_cooldown_threshold: target?.value ?? "",
 									});
 								}}
 							/>

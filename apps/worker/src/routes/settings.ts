@@ -16,7 +16,6 @@ import {
 	bumpCacheVersions,
 	getCacheConfig,
 	getCheckinScheduleTime,
-	getModelFailureCooldownMinutes,
 	getProxyRuntimeSettings,
 	getRetentionDays,
 	getRuntimeEventContextMaxLength,
@@ -28,7 +27,6 @@ import {
 	setAdminPasswordHash,
 	setCacheConfig,
 	setCheckinScheduleTime,
-	setModelFailureCooldownMinutes,
 	setProxyRuntimeSettings,
 	setRetentionDays,
 	setRuntimeEventContextMaxLength,
@@ -53,9 +51,7 @@ settings.get("/", async (c) => {
 	const sessionTtlHours = await getSessionTtlHours(c.env.DB);
 	const adminPasswordSet = await isAdminPasswordSet(c.env.DB);
 	const checkinScheduleTime = await getCheckinScheduleTime(c.env.DB);
-	const modelFailureCooldownMinutes = await getModelFailureCooldownMinutes(
-		c.env.DB,
-	);
+
 	const runtimeEventRetentionDays = await getRuntimeEventRetentionDays(
 		c.env.DB,
 	);
@@ -91,10 +87,11 @@ settings.get("/", async (c) => {
 			const status = await getUsageQueueStatus(
 				getUsageLimiterStub(c.env.USAGE_LIMITER),
 			);
-			const effectiveTotal =
-				status.enqueue_success_count + status.direct_count;
+			const effectiveTotal = status.enqueue_success_count + status.direct_count;
 			const effectiveQueueRatio =
-				effectiveTotal > 0 ? status.enqueue_success_count / effectiveTotal : null;
+				effectiveTotal > 0
+					? status.enqueue_success_count / effectiveTotal
+					: null;
 			const effectiveDirectRatio =
 				effectiveTotal > 0 ? status.direct_count / effectiveTotal : null;
 			usageQueueStatus = {
@@ -111,10 +108,8 @@ settings.get("/", async (c) => {
 				reserve_failed_count: status.reserve_failed_count,
 				reserve_over_limit_count: status.reserve_over_limit_count,
 				queue_send_failed_count: status.queue_send_failed_count,
-				target_queue_ratio:
-					1 - runtimeSettings.usage_queue_direct_write_ratio,
-				target_direct_ratio:
-					runtimeSettings.usage_queue_direct_write_ratio,
+				target_queue_ratio: 1 - runtimeSettings.usage_queue_direct_write_ratio,
+				target_direct_ratio: runtimeSettings.usage_queue_direct_write_ratio,
 				effective_queue_ratio: effectiveQueueRatio,
 				effective_direct_ratio: effectiveDirectRatio,
 				effective_total_count: effectiveTotal,
@@ -158,7 +153,10 @@ settings.get("/", async (c) => {
 		session_ttl_hours: sessionTtlHours,
 		admin_password_set: adminPasswordSet,
 		checkin_schedule_time: checkinScheduleTime,
-		model_failure_cooldown_minutes: modelFailureCooldownMinutes,
+		proxy_model_failure_cooldown_minutes:
+			runtimeSettings.model_failure_cooldown_minutes,
+		proxy_model_failure_cooldown_threshold:
+			runtimeSettings.model_failure_cooldown_threshold,
 		runtime_event_retention_days: runtimeEventRetentionDays,
 		runtime_event_levels: runtimeEventLevels,
 		runtime_event_context_max_length: runtimeEventContextMaxLength,
@@ -194,6 +192,8 @@ settings.put("/", async (c) => {
 	const runtimePatch: {
 		upstream_timeout_ms?: number;
 		retry_max_retries?: number;
+		model_failure_cooldown_minutes?: number;
+		model_failure_cooldown_threshold?: number;
 		stream_usage_mode?: string;
 		stream_usage_max_bytes?: number;
 		stream_usage_max_parsers?: number;
@@ -232,20 +232,6 @@ settings.put("/", async (c) => {
 			);
 		}
 		await setSessionTtlHours(c.env.DB, hours);
-		touched = true;
-	}
-
-	if (body.model_failure_cooldown_minutes !== undefined) {
-		const minutes = Number(body.model_failure_cooldown_minutes);
-		if (Number.isNaN(minutes) || minutes < 0) {
-			return jsonError(
-				c,
-				400,
-				"invalid_model_failure_cooldown_minutes",
-				"invalid_model_failure_cooldown_minutes",
-			);
-		}
-		await setModelFailureCooldownMinutes(c.env.DB, minutes);
 		touched = true;
 	}
 
@@ -466,6 +452,38 @@ settings.put("/", async (c) => {
 			);
 		}
 		runtimePatch.retry_max_retries = retryMaxRetries;
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_model_failure_cooldown_minutes !== undefined) {
+		const minutes = Number(body.proxy_model_failure_cooldown_minutes);
+		if (Number.isNaN(minutes) || minutes < 0) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_model_failure_cooldown_minutes",
+				"invalid_proxy_model_failure_cooldown_minutes",
+			);
+		}
+		runtimePatch.model_failure_cooldown_minutes = Math.floor(minutes);
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_model_failure_cooldown_threshold !== undefined) {
+		const threshold = Number(body.proxy_model_failure_cooldown_threshold);
+		if (
+			Number.isNaN(threshold) ||
+			threshold < 1 ||
+			!Number.isInteger(threshold)
+		) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_model_failure_cooldown_threshold",
+				"invalid_proxy_model_failure_cooldown_threshold",
+			);
+		}
+		runtimePatch.model_failure_cooldown_threshold = threshold;
 		runtimeTouched = true;
 	}
 

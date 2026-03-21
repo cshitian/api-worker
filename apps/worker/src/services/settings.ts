@@ -23,6 +23,7 @@ const DEFAULT_LOG_RETENTION_DAYS = 30;
 const DEFAULT_SESSION_TTL_HOURS = 12;
 const DEFAULT_CHECKIN_SCHEDULE_TIME = "00:10";
 const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 10;
+const DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD = 2;
 const DEFAULT_PROXY_STREAM_USAGE_MODE = "full";
 const DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES = 0;
 const DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS = 0;
@@ -52,6 +53,7 @@ const SESSION_TTL_KEY = "session_ttl_hours";
 const ADMIN_PASSWORD_HASH_KEY = "admin_password_hash";
 const CHECKIN_SCHEDULE_TIME_KEY = "checkin_schedule_time";
 const MODEL_FAILURE_COOLDOWN_KEY = "model_failure_cooldown_minutes";
+const MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY = "model_failure_cooldown_threshold";
 const CACHE_ENABLED_KEY = "cache_enabled";
 const CACHE_DASHBOARD_TTL_KEY = "cache_ttl_dashboard_seconds";
 const CACHE_USAGE_TTL_KEY = "cache_ttl_usage_seconds";
@@ -87,6 +89,8 @@ const RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY = "runtime_event_context_max_length";
 export type RuntimeProxyConfig = {
 	upstream_timeout_ms: number;
 	retry_max_retries: number;
+	model_failure_cooldown_minutes: number;
+	model_failure_cooldown_threshold: number;
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
@@ -100,6 +104,8 @@ export type RuntimeProxyConfig = {
 export type ProxyRuntimeSettings = {
 	upstream_timeout_ms: number;
 	retry_max_retries: number;
+	model_failure_cooldown_minutes: number;
+	model_failure_cooldown_threshold: number;
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
@@ -420,6 +426,14 @@ export async function getProxyRuntimeSettings(
 		settings[PROXY_RETRY_MAX_RETRIES_KEY] ?? null,
 		DEFAULT_PROXY_RETRY_MAX_RETRIES,
 	);
+	const modelFailureCooldownMinutes = parseNonNegativeSetting(
+		settings[MODEL_FAILURE_COOLDOWN_KEY] ?? null,
+		DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES,
+	);
+	const modelFailureCooldownThreshold = parsePositiveSetting(
+		settings[MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY] ?? null,
+		DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD,
+	);
 	const streamUsageMode = normalizeStreamUsageMode(
 		settings[PROXY_STREAM_USAGE_MODE_KEY],
 	);
@@ -458,6 +472,8 @@ export async function getProxyRuntimeSettings(
 	return {
 		upstream_timeout_ms: upstreamTimeout,
 		retry_max_retries: retryMaxRetries,
+		model_failure_cooldown_minutes: modelFailureCooldownMinutes,
+		model_failure_cooldown_threshold: modelFailureCooldownThreshold,
 		stream_usage_mode: streamUsageMode,
 		stream_usage_max_bytes: streamUsageMaxBytes,
 		stream_usage_max_parsers: streamUsageMaxParsers,
@@ -510,6 +526,26 @@ export async function setProxyRuntimeSettings(
 				db,
 				PROXY_RETRY_MAX_RETRIES_KEY,
 				String(Math.max(0, Math.floor(update.retry_max_retries))),
+			),
+		);
+	}
+	if (update.model_failure_cooldown_minutes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				MODEL_FAILURE_COOLDOWN_KEY,
+				String(Math.max(0, Math.floor(update.model_failure_cooldown_minutes))),
+			),
+		);
+	}
+	if (update.model_failure_cooldown_threshold !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY,
+				String(
+					Math.max(1, Math.floor(update.model_failure_cooldown_threshold)),
+				),
 			),
 		);
 	}

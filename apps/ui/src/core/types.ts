@@ -152,7 +152,8 @@ export type Settings = {
 	session_ttl_hours: number;
 	admin_password_set?: boolean;
 	checkin_schedule_time?: string;
-	model_failure_cooldown_minutes?: number;
+	proxy_model_failure_cooldown_minutes?: number;
+	proxy_model_failure_cooldown_threshold?: number;
 	runtime_settings?: RuntimeProxySettings;
 	runtime_config?: RuntimeProxyConfig;
 	cache_config?: CacheConfig;
@@ -163,6 +164,8 @@ export type Settings = {
 export type RuntimeProxySettings = {
 	upstream_timeout_ms: number;
 	retry_max_retries: number;
+	model_failure_cooldown_minutes: number;
+	model_failure_cooldown_threshold: number;
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
@@ -278,7 +281,8 @@ export type SettingsForm = {
 	session_ttl_hours: string;
 	admin_password: string;
 	checkin_schedule_time: string;
-	model_failure_cooldown_minutes: string;
+	proxy_model_failure_cooldown_minutes: string;
+	proxy_model_failure_cooldown_threshold: string;
 	runtime_event_context_max_length: string;
 	proxy_upstream_timeout_ms: string;
 	proxy_retry_max_retries: string;

@@ -736,8 +736,11 @@ const App = () => {
 			session_ttl_hours: String(data.settings.session_ttl_hours ?? 12),
 			admin_password: "",
 			checkin_schedule_time: data.settings.checkin_schedule_time ?? "00:10",
-			model_failure_cooldown_minutes: String(
-				data.settings.model_failure_cooldown_minutes ?? 10,
+			proxy_model_failure_cooldown_minutes: String(
+				runtimeSettings?.model_failure_cooldown_minutes ?? 10,
+			),
+			proxy_model_failure_cooldown_threshold: String(
+				runtimeSettings?.model_failure_cooldown_threshold ?? 2,
 			),
 			runtime_event_context_max_length: String(
 				data.settings.runtime_event_context_max_length ?? 16000,
@@ -1500,7 +1503,10 @@ const App = () => {
 			);
 			const sessionTtlHours = Number(settingsForm.session_ttl_hours);
 			const failureCooldownMinutes = Number(
-				settingsForm.model_failure_cooldown_minutes,
+				settingsForm.proxy_model_failure_cooldown_minutes,
+			);
+			const failureCooldownThreshold = Number(
+				settingsForm.proxy_model_failure_cooldown_threshold,
 			);
 			const runtimeEventContextMaxLength = Number(
 				settingsForm.runtime_event_context_max_length,
@@ -1555,7 +1561,15 @@ const App = () => {
 				return;
 			}
 			if (Number.isNaN(failureCooldownMinutes) || failureCooldownMinutes < 0) {
-				pushNotice("warning", "失败冷却需为非负整数");
+				pushNotice("warning", "失败冷却时长需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(failureCooldownThreshold) ||
+				failureCooldownThreshold < 1 ||
+				!Number.isInteger(failureCooldownThreshold)
+			) {
+				pushNotice("warning", "连续失败次数阈值需为正整数");
 				return;
 			}
 			if (
@@ -1657,7 +1671,8 @@ const App = () => {
 				session_ttl_hours: sessionTtlHours,
 				checkin_schedule_time:
 					settingsForm.checkin_schedule_time.trim() || "00:10",
-				model_failure_cooldown_minutes: failureCooldownMinutes,
+				proxy_model_failure_cooldown_minutes: failureCooldownMinutes,
+				proxy_model_failure_cooldown_threshold: failureCooldownThreshold,
 				proxy_upstream_timeout_ms: upstreamTimeoutMs,
 				proxy_retry_max_retries: retryMaxRetries,
 				proxy_stream_usage_mode: streamUsageMode,
