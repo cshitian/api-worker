@@ -204,6 +204,18 @@ export type UsageQueueStatus = {
 	enabled: boolean;
 	bound: boolean;
 	active: boolean;
+	reserved_count: number | null;
+	enqueue_success_count: number | null;
+	direct_count: number | null;
+	fallback_direct_count: number | null;
+	reserve_failed_count: number | null;
+	reserve_over_limit_count: number | null;
+	queue_send_failed_count: number | null;
+	target_queue_ratio: number;
+	target_direct_ratio: number;
+	effective_queue_ratio: number | null;
+	effective_direct_ratio: number | null;
+	effective_total_count: number | null;
 };
 
 export type ModelChannel = {

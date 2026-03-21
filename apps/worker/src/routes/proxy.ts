@@ -46,6 +46,8 @@ import {
 import {
 	getUsageLimiterStub,
 	reserveUsageQueue,
+	trackUsageQueue,
+	type UsageQueueTrackKind,
 } from "../services/usage-limiter";
 import {
 	processUsageQueueEvent,
@@ -228,6 +230,29 @@ function withTimeout<T>(
 	});
 }
 
+function hashFNV1a32(input: string): number {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < input.length; i += 1) {
+		hash ^= input.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return hash >>> 0;
+}
+
+function shouldDirectWriteByRatio(
+	dispatchKey: string,
+	directRatio: number,
+): boolean {
+	if (directRatio <= 0) {
+		return false;
+	}
+	if (directRatio >= 1) {
+		return true;
+	}
+	const bucket = hashFNV1a32(dispatchKey) / 0x1_0000_0000;
+	return bucket < directRatio;
+}
+
 function createUsageEventScheduler(
 	c: { env: AppEnv["Bindings"]; executionCtx?: ExecutionContextLike },
 	settings: {
@@ -241,6 +266,7 @@ function createUsageEventScheduler(
 		method?: string | null;
 		tokenId?: string | null;
 		model?: string | null;
+		requestSeed?: string | null;
 	},
 ): (event: UsageQueueEvent) => void {
 	const queue = c.env.USAGE_QUEUE;
@@ -257,8 +283,10 @@ function createUsageEventScheduler(
 		0,
 		Math.floor(settings.usage_reserve_breaker_ms),
 	);
+	const requestSeed = diagnostics.requestSeed ?? String(Date.now());
 	let overLimit = false;
 	let reserveBreakerUntil = 0;
+	let dispatchSequence = 0;
 	const emitRuntimeEvent = (
 		level: "info" | "warning" | "error",
 		code: string,
@@ -281,21 +309,73 @@ function createUsageEventScheduler(
 		scheduleDbWrite(c, task);
 	};
 
-	const shouldUseQueue = async (): Promise<boolean> => {
+	const trackQueueMetric = (kind: UsageQueueTrackKind): void => {
+		if (!limiter) {
+			return;
+		}
+		const task = withTimeout(
+			trackUsageQueue(limiter, { kind }),
+			reserveTimeoutMs,
+			"usage_track_timeout",
+		)
+			.then(() => undefined)
+			.catch(() => undefined);
+		scheduleDbWrite(c, task);
+	};
+
+	const buildDispatchKey = (event: UsageQueueEvent): string => {
+		dispatchSequence += 1;
+		return [
+			requestSeed,
+			diagnostics.tokenId ?? "anonymous",
+			diagnostics.requestPath ?? "-",
+			diagnostics.model ?? "-",
+			event.type,
+			String(dispatchSequence),
+		].join(":");
+	};
+
+	type QueueDecision = {
+		useQueue: boolean;
+		reason:
+			| "queue_disabled"
+			| "over_limit"
+			| "reserve_breaker"
+			| "direct_ratio"
+			| "reserve_failed"
+			| "allowed";
+	};
+
+	const shouldUseQueue = async (dispatchKey: string): Promise<QueueDecision> => {
 		if (!queueEnabled) {
-			return false;
+			return {
+				useQueue: false,
+				reason: "queue_disabled",
+			};
 		}
 		if (overLimit) {
-			return false;
+			return {
+				useQueue: false,
+				reason: "over_limit",
+			};
 		}
 		if (Date.now() < reserveBreakerUntil) {
-			return false;
+			return {
+				useQueue: false,
+				reason: "reserve_breaker",
+			};
 		}
-		if (Math.random() < directRatio) {
-			return false;
+		if (shouldDirectWriteByRatio(dispatchKey, directRatio)) {
+			return {
+				useQueue: false,
+				reason: "direct_ratio",
+			};
 		}
 		if (!limiter || dailyLimit <= 0) {
-			return true;
+			return {
+				useQueue: true,
+				reason: "allowed",
+			};
 		}
 		try {
 			const result = await withTimeout(
@@ -315,7 +395,10 @@ function createUsageEventScheduler(
 					{ limit: dailyLimit },
 				);
 			}
-			return result.allowed;
+			return {
+				useQueue: result.allowed,
+				reason: result.allowed ? "allowed" : "over_limit",
+			};
 		} catch (error) {
 			reserveBreakerUntil = Date.now() + reserveBreakerMs;
 			emitRuntimeEvent(
@@ -327,31 +410,29 @@ function createUsageEventScheduler(
 					breaker_ms: reserveBreakerMs,
 				},
 			);
-			return false;
+			return {
+				useQueue: false,
+				reason: "reserve_failed",
+			};
 		}
 	};
 
 	return (event: UsageQueueEvent) => {
 		const task = (async () => {
-			// usage 主日志永远走直写，避免队列或限流检查导致观测断流。
-			if (event.type === "usage") {
-				await processUsageQueueEvent(
-					c.env.DB,
-					event,
-					c.env.CACHE_VERSION_STORE,
-				);
-				return;
-			}
-			const useQueue = await shouldUseQueue();
-			if (useQueue && queue) {
+			const dispatchKey = buildDispatchKey(event);
+			const decision = await shouldUseQueue(dispatchKey);
+			if (decision.useQueue && queue) {
 				try {
 					await withTimeout(
 						queue.send(event),
 						queueSendTimeoutMs,
 						"usage_queue_send_timeout",
 					);
+					trackQueueMetric("enqueue_success");
 					return;
 				} catch (error) {
+					trackQueueMetric("queue_send_failed");
+					trackQueueMetric("fallback_direct");
 					emitRuntimeEvent(
 						"warning",
 						"usage_queue_send_failed",
@@ -361,6 +442,14 @@ function createUsageEventScheduler(
 							fallback: "direct_write",
 						},
 					);
+				}
+			} else {
+				if (decision.reason === "reserve_failed") {
+					trackQueueMetric("reserve_failed");
+				} else if (decision.reason === "over_limit") {
+					trackQueueMetric("reserve_over_limit");
+				} else {
+					trackQueueMetric("direct");
 				}
 			}
 			await processUsageQueueEvent(c.env.DB, event, c.env.CACHE_VERSION_STORE);
@@ -703,6 +792,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		method: c.req.method,
 		tokenId: tokenRecord.id,
 		model: downstreamModel,
+		requestSeed: String(requestStart),
 	});
 	if (
 		downstreamProvider === "openai" &&

@@ -77,12 +77,43 @@ export const SettingsView = ({
 			: runtimeConfig.usage_queue_active
 				? "是"
 				: "否";
-	const queueUsageValue = usageQueueStatus
+	const formatRatio = (value: number | null | undefined): string => {
+		if (typeof value !== "number" || Number.isNaN(value)) {
+			return "-";
+		}
+		return `${(value * 100).toFixed(1)}%`;
+	};
+	const queueReservedValue = usageQueueStatus
 		? usageQueueStatus.count === null
 			? "未绑定"
 			: usageQueueStatus.limit > 0
 				? `${usageQueueStatus.count} / ${usageQueueStatus.limit}`
 				: String(usageQueueStatus.count)
+		: "-";
+	const queueEnqueueSuccessValue = usageQueueStatus
+		? usageQueueStatus.enqueue_success_count === null
+			? "未绑定"
+			: String(usageQueueStatus.enqueue_success_count)
+		: "-";
+	const queueDirectValue = usageQueueStatus
+		? usageQueueStatus.direct_count === null
+			? "未绑定"
+			: String(usageQueueStatus.direct_count)
+		: "-";
+	const queueFallbackDirectValue = usageQueueStatus
+		? usageQueueStatus.fallback_direct_count === null
+			? "未绑定"
+			: String(usageQueueStatus.fallback_direct_count)
+		: "-";
+	const queueRatioValue = usageQueueStatus
+		? `${formatRatio(usageQueueStatus.effective_queue_ratio)} / ${formatRatio(
+				usageQueueStatus.target_queue_ratio,
+			)}`
+		: "-";
+	const directRatioValue = usageQueueStatus
+		? `${formatRatio(usageQueueStatus.effective_direct_ratio)} / ${formatRatio(
+				usageQueueStatus.target_direct_ratio,
+			)}`
 		: "-";
 
 	const cacheItems = [
@@ -597,13 +628,37 @@ export const SettingsView = ({
 							<div class="app-settings-stat__value">{queueActiveValue}</div>
 						</div>
 						<div class="app-settings-stat">
-							<div class="app-settings-stat__label">队列使用数量</div>
-							<div class="app-settings-stat__value">{queueUsageValue}</div>
+							<div class="app-settings-stat__label">队列预占数量</div>
+							<div class="app-settings-stat__value">{queueReservedValue}</div>
 							<div class="app-settings-stat__hint">
 								{usageQueueStatus?.date
 									? `统计日期：${usageQueueStatus.date}`
 									: "统计日期：-"}
 							</div>
+						</div>
+						<div class="app-settings-stat">
+							<div class="app-settings-stat__label">真实入队数量</div>
+							<div class="app-settings-stat__value">
+								{queueEnqueueSuccessValue}
+							</div>
+						</div>
+						<div class="app-settings-stat">
+							<div class="app-settings-stat__label">真实直写数量</div>
+							<div class="app-settings-stat__value">{queueDirectValue}</div>
+						</div>
+						<div class="app-settings-stat">
+							<div class="app-settings-stat__label">回退直写数量</div>
+							<div class="app-settings-stat__value">
+								{queueFallbackDirectValue}
+							</div>
+						</div>
+						<div class="app-settings-stat">
+							<div class="app-settings-stat__label">队列比例（实际/目标）</div>
+							<div class="app-settings-stat__value">{queueRatioValue}</div>
+						</div>
+						<div class="app-settings-stat">
+							<div class="app-settings-stat__label">直写比例（实际/目标）</div>
+							<div class="app-settings-stat__value">{directRatioValue}</div>
 						</div>
 					</div>
 				</Card>

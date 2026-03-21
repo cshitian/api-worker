@@ -73,12 +73,30 @@ settings.get("/", async (c) => {
 		enabled: boolean;
 		bound: boolean;
 		active: boolean;
+		reserved_count: number | null;
+		enqueue_success_count: number | null;
+		direct_count: number | null;
+		fallback_direct_count: number | null;
+		reserve_failed_count: number | null;
+		reserve_over_limit_count: number | null;
+		queue_send_failed_count: number | null;
+		target_queue_ratio: number;
+		target_direct_ratio: number;
+		effective_queue_ratio: number | null;
+		effective_direct_ratio: number | null;
+		effective_total_count: number | null;
 	} | null = null;
 	if (c.env.USAGE_LIMITER) {
 		try {
 			const status = await getUsageQueueStatus(
 				getUsageLimiterStub(c.env.USAGE_LIMITER),
 			);
+			const effectiveTotal =
+				status.enqueue_success_count + status.direct_count;
+			const effectiveQueueRatio =
+				effectiveTotal > 0 ? status.enqueue_success_count / effectiveTotal : null;
+			const effectiveDirectRatio =
+				effectiveTotal > 0 ? status.direct_count / effectiveTotal : null;
 			usageQueueStatus = {
 				count: status.count,
 				date: status.date,
@@ -86,6 +104,20 @@ settings.get("/", async (c) => {
 				enabled: runtimeSettings.usage_queue_enabled,
 				bound: runtimeConfig.usage_queue_bound,
 				active: runtimeConfig.usage_queue_active,
+				reserved_count: status.reserved_count,
+				enqueue_success_count: status.enqueue_success_count,
+				direct_count: status.direct_count,
+				fallback_direct_count: status.fallback_direct_count,
+				reserve_failed_count: status.reserve_failed_count,
+				reserve_over_limit_count: status.reserve_over_limit_count,
+				queue_send_failed_count: status.queue_send_failed_count,
+				target_queue_ratio:
+					1 - runtimeSettings.usage_queue_direct_write_ratio,
+				target_direct_ratio:
+					runtimeSettings.usage_queue_direct_write_ratio,
+				effective_queue_ratio: effectiveQueueRatio,
+				effective_direct_ratio: effectiveDirectRatio,
+				effective_total_count: effectiveTotal,
 			};
 		} catch (error) {
 			await recordRuntimeEvent(c.env.DB, {
@@ -107,6 +139,18 @@ settings.get("/", async (c) => {
 			enabled: runtimeSettings.usage_queue_enabled,
 			bound: runtimeConfig.usage_queue_bound,
 			active: runtimeConfig.usage_queue_active,
+			reserved_count: null,
+			enqueue_success_count: null,
+			direct_count: null,
+			fallback_direct_count: null,
+			reserve_failed_count: null,
+			reserve_over_limit_count: null,
+			queue_send_failed_count: null,
+			target_queue_ratio: 1 - runtimeSettings.usage_queue_direct_write_ratio,
+			target_direct_ratio: runtimeSettings.usage_queue_direct_write_ratio,
+			effective_queue_ratio: null,
+			effective_direct_ratio: null,
+			effective_total_count: null,
 		};
 	}
 	return c.json({
