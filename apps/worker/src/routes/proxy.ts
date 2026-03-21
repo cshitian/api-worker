@@ -89,18 +89,23 @@ type ErrorDetails = {
 	errorMessage: string | null;
 };
 
-const FAILURE_COUNT_THRESHOLD = 2;
-const USAGE_RESERVE_TIMEOUT_MS = 600;
-const USAGE_QUEUE_SEND_TIMEOUT_MS = 1500;
-const USAGE_RESERVE_BREAKER_MS = 60_000;
-const STREAM_USAGE_PARSE_TIMEOUT_MS = 20_000;
-const MAX_USAGE_ERROR_MESSAGE_LENGTH = 320;
 const STREAM_USAGE_UNKNOWN_PARSE_ERROR_CODE =
 	"usage_stream_parse_unknown_error";
 const STREAM_USAGE_NON_ERROR_THROWN_CODE =
 	"usage_stream_parse_non_error_thrown";
 const PROXY_UPSTREAM_TIMEOUT_ERROR_CODE = "proxy_upstream_timeout";
 const PROXY_UPSTREAM_FETCH_ERROR_CODE = "proxy_upstream_fetch_exception";
+const INTERNAL_USAGE_RESERVE_TIMEOUT_MS = 600;
+const INTERNAL_USAGE_QUEUE_SEND_TIMEOUT_MS = 1500;
+const INTERNAL_COOLDOWN_FAILURE_THRESHOLD = 2;
+const INTERNAL_COOLDOWN_HTTP_STATUSES = [408, 429];
+const INTERNAL_COOLDOWN_MIN_STATUS = 500;
+const INTERNAL_COOLDOWN_ERROR_CODES = [
+	"timeout",
+	"exception",
+	PROXY_UPSTREAM_TIMEOUT_ERROR_CODE,
+	PROXY_UPSTREAM_FETCH_ERROR_CODE,
+];
 
 let activeStreamUsageParsers = 0;
 
@@ -115,26 +120,38 @@ function normalizeMessage(value: string | null): string | null {
 	return trimmed;
 }
 
-function formatUsageErrorMessage(code: string, detail: string | null): string {
+function formatUsageErrorMessage(
+	code: string,
+	detail: string | null,
+	maxLength: number,
+): string {
+	const safeMaxLength = Math.max(1, Math.floor(maxLength));
 	const normalized = normalizeMessage(detail);
 	if (!normalized) {
 		return code;
 	}
 	const combined = `${code}: ${normalized}`;
-	if (combined.length <= MAX_USAGE_ERROR_MESSAGE_LENGTH) {
+	if (combined.length <= safeMaxLength) {
 		return combined;
 	}
-	return `${combined.slice(0, MAX_USAGE_ERROR_MESSAGE_LENGTH - 1)}…`;
+	return `${combined.slice(0, safeMaxLength - 1)}…`;
 }
 
-function classifyStreamUsageParseError(error: unknown): {
+function classifyStreamUsageParseError(
+	error: unknown,
+	maxLength: number,
+): {
 	errorCode: string;
 	errorMessage: string;
 } {
 	if (error instanceof StreamUsageParseError) {
 		return {
 			errorCode: error.code,
-			errorMessage: formatUsageErrorMessage(error.code, error.detail),
+			errorMessage: formatUsageErrorMessage(
+				error.code,
+				error.detail,
+				maxLength,
+			),
 		};
 	}
 	if (error instanceof Error) {
@@ -144,6 +161,7 @@ function classifyStreamUsageParseError(error: unknown): {
 			errorMessage: formatUsageErrorMessage(
 				errorCode,
 				normalizeMessage(error.message) ?? error.name,
+				maxLength,
 			),
 		};
 	}
@@ -216,6 +234,7 @@ function createUsageEventScheduler(
 		usage_queue_enabled: boolean;
 		usage_queue_daily_limit: number;
 		usage_queue_direct_write_ratio: number;
+		usage_reserve_breaker_ms: number;
 	},
 	diagnostics: {
 		requestId?: string | null;
@@ -234,6 +253,12 @@ function createUsageEventScheduler(
 		: null;
 	const directRatio = settings.usage_queue_direct_write_ratio;
 	const dailyLimit = settings.usage_queue_daily_limit;
+	const reserveTimeoutMs = INTERNAL_USAGE_RESERVE_TIMEOUT_MS;
+	const queueSendTimeoutMs = INTERNAL_USAGE_QUEUE_SEND_TIMEOUT_MS;
+	const reserveBreakerMs = Math.max(
+		0,
+		Math.floor(settings.usage_reserve_breaker_ms),
+	);
 	let overLimit = false;
 	let reserveBreakerUntil = 0;
 	const emitRuntimeEvent = (
@@ -282,7 +307,7 @@ function createUsageEventScheduler(
 					limit: dailyLimit,
 					amount: 1,
 				}),
-				USAGE_RESERVE_TIMEOUT_MS,
+				reserveTimeoutMs,
 				"usage_reserve_timeout",
 			);
 			if (!result.allowed) {
@@ -296,14 +321,14 @@ function createUsageEventScheduler(
 			}
 			return result.allowed;
 		} catch (error) {
-			reserveBreakerUntil = Date.now() + USAGE_RESERVE_BREAKER_MS;
+			reserveBreakerUntil = Date.now() + reserveBreakerMs;
 			emitRuntimeEvent(
 				"warning",
 				"usage_limiter_reserve_failed",
 				"usage_limiter_reserve_failed",
 				{
 					error: error instanceof Error ? error.message : String(error),
-					breaker_ms: USAGE_RESERVE_BREAKER_MS,
+					breaker_ms: reserveBreakerMs,
 				},
 			);
 			return false;
@@ -326,7 +351,7 @@ function createUsageEventScheduler(
 				try {
 					await withTimeout(
 						queue.send(event),
-						USAGE_QUEUE_SEND_TIMEOUT_MS,
+						queueSendTimeoutMs,
 						"usage_queue_send_timeout",
 					);
 					return;
@@ -399,18 +424,23 @@ export function shouldCooldown(
 	upstreamStatus: number | null,
 	errorCode: string | null,
 ): boolean {
-	if (
-		errorCode === "timeout" ||
-		errorCode === "exception" ||
-		errorCode === PROXY_UPSTREAM_TIMEOUT_ERROR_CODE ||
-		errorCode === PROXY_UPSTREAM_FETCH_ERROR_CODE
-	) {
+	const normalizedCode = normalizeMessage(errorCode)?.toLowerCase() ?? "";
+	const cooldownErrorCodes = new Set(
+		INTERNAL_COOLDOWN_ERROR_CODES.map((item) => item.trim().toLowerCase()),
+	);
+	if (normalizedCode && cooldownErrorCodes.has(normalizedCode)) {
 		return true;
 	}
-	if (upstreamStatus === 429 || upstreamStatus === 408) {
+	const cooldownStatuses = new Set(
+		INTERNAL_COOLDOWN_HTTP_STATUSES.map((item) =>
+			Math.floor(Number(item)),
+		).filter((item) => Number.isInteger(item) && item >= 0),
+	);
+	if (upstreamStatus !== null && cooldownStatuses.has(upstreamStatus)) {
 		return true;
 	}
-	if (upstreamStatus !== null && upstreamStatus >= 500) {
+	const minStatus = Math.max(0, Math.floor(INTERNAL_COOLDOWN_MIN_STATUS));
+	if (upstreamStatus !== null && minStatus > 0 && upstreamStatus >= minStatus) {
 		return true;
 	}
 	return false;
@@ -854,13 +884,25 @@ proxy.all("/*", tokenAuth, async (c) => {
 	);
 	const cooldownMinutes = await getModelFailureCooldownMinutes(c.env.DB);
 	const cooldownSeconds = Math.max(0, Math.floor(cooldownMinutes)) * 60;
+	const cooldownFailureThreshold = Math.max(
+		1,
+		Math.floor(INTERNAL_COOLDOWN_FAILURE_THRESHOLD),
+	);
+	const usageErrorMessageMaxLength = Math.max(
+		1,
+		Math.floor(runtimeSettings.usage_error_message_max_length),
+	);
+	const streamUsageParseTimeoutMs = Math.max(
+		0,
+		Math.floor(runtimeSettings.stream_usage_parse_timeout_ms),
+	);
 	if (downstreamModel && cooldownSeconds > 0 && candidates.length > 0) {
 		const coolingChannels = await listCoolingDownChannelsForModel(
 			c.env.DB,
 			candidates.map((channel) => channel.id),
 			downstreamModel,
 			cooldownSeconds,
-			FAILURE_COUNT_THRESHOLD,
+			cooldownFailureThreshold,
 		);
 		if (coolingChannels.size > 0) {
 			candidates = candidates.filter(
@@ -920,8 +962,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 	);
 	const ordered = createWeightedOrder(candidates).slice(0, maxRetries + 1);
 	const upstreamTimeoutMs = Math.max(
-		1000,
-		Number(runtimeSettings.upstream_timeout_ms ?? 30000),
+		0,
+		Math.floor(Number(runtimeSettings.upstream_timeout_ms ?? 30000)),
 	);
 	const nowSeconds = Math.floor(Date.now() / 1000);
 	let selectedResponse: Response | null = null;
@@ -1332,6 +1374,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			const usageErrorMessage = formatUsageErrorMessage(
 				usageErrorCode,
 				usageErrorDetail,
+				usageErrorMessageMaxLength,
 			);
 			scheduleRuntimeEvent(
 				"error",
@@ -1467,7 +1510,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			activeStreamUsageParsers += 1;
 			const task = parseUsageFromSse(selectedResponse.clone(), {
 				...streamUsageOptions,
-				timeoutMs: STREAM_USAGE_PARSE_TIMEOUT_MS,
+				timeoutMs: streamUsageParseTimeoutMs,
 			})
 				.then((streamUsage) => {
 					const usageValue = selectedImmediateUsage ?? streamUsage.usage;
@@ -1478,10 +1521,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 							"usage_stream_parse_timeout",
 							{
 								path: selectedRequestPath,
-								timeout_ms: STREAM_USAGE_PARSE_TIMEOUT_MS,
+								timeout_ms: streamUsageParseTimeoutMs,
 							},
 						);
-						const timeoutMessage = `usage_parse_timeout: stream usage parsing timed out after ${STREAM_USAGE_PARSE_TIMEOUT_MS}ms`;
+						const timeoutMessage = `usage_parse_timeout: stream usage parsing timed out after ${streamUsageParseTimeoutMs}ms`;
 						finalizeUsage({
 							channelId: selectedChannel.id,
 							requestPath: selectedRequestPath,
@@ -1522,7 +1565,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 					});
 				})
 				.catch((error) => {
-					const parseFailure = classifyStreamUsageParseError(error);
+					const parseFailure = classifyStreamUsageParseError(
+						error,
+						usageErrorMessageMaxLength,
+					);
 					scheduleRuntimeEvent(
 						"warning",
 						"usage_stream_parse_failed",

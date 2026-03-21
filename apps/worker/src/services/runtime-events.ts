@@ -52,13 +52,18 @@ export type RuntimeEventListOptions = {
 };
 
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
-const MAX_CONTEXT_LENGTH = 16_000;
+const DEFAULT_CONTEXT_MAX_LENGTH = 16_000;
 const RUNTIME_EVENT_LEVELS_KEY = "runtime_event_levels";
+const RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY = "runtime_event_context_max_length";
 const RUNTIME_EVENT_LEVEL_SNAPSHOT_TTL_MS = 1000;
 let lastRuntimeEventPruneAt = 0;
 let lastRuntimeEventPruneRetention: number | null = null;
 let runtimeEventLevelSnapshot: {
 	value: Set<RuntimeEventLevel>;
+	expiresAt: number;
+} | null = null;
+let runtimeEventContextMaxLengthSnapshot: {
+	value: number;
 	expiresAt: number;
 } | null = null;
 
@@ -120,12 +125,49 @@ async function readAllowedRuntimeEventLevels(
 	return value;
 }
 
+function normalizeContextMaxLength(value: string | null | undefined): number {
+	if (value === null || value === undefined) {
+		return DEFAULT_CONTEXT_MAX_LENGTH;
+	}
+	const parsed = Number(value);
+	if (Number.isNaN(parsed) || parsed < 0) {
+		return DEFAULT_CONTEXT_MAX_LENGTH;
+	}
+	return Math.floor(parsed);
+}
+
+async function readRuntimeEventContextMaxLength(
+	db: D1Database,
+): Promise<number> {
+	const now = Date.now();
+	if (
+		runtimeEventContextMaxLengthSnapshot &&
+		runtimeEventContextMaxLengthSnapshot.expiresAt > now
+	) {
+		return runtimeEventContextMaxLengthSnapshot.value;
+	}
+	const row = await db
+		.prepare("SELECT value FROM settings WHERE key = ?")
+		.bind(RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY)
+		.first<{ value?: string }>();
+	const value = normalizeContextMaxLength(
+		typeof row?.value === "string" ? row.value : null,
+	);
+	runtimeEventContextMaxLengthSnapshot = {
+		value,
+		expiresAt: now + RUNTIME_EVENT_LEVEL_SNAPSHOT_TTL_MS,
+	};
+	return value;
+}
+
 export function resetRuntimeEventLevelSnapshot(): void {
 	runtimeEventLevelSnapshot = null;
+	runtimeEventContextMaxLengthSnapshot = null;
 }
 
 function serializeContext(
 	context: Record<string, unknown> | null | undefined,
+	maxContextLength: number,
 ): string | null {
 	if (!context) {
 		return null;
@@ -135,10 +177,11 @@ function serializeContext(
 		if (!raw) {
 			return null;
 		}
-		if (raw.length <= MAX_CONTEXT_LENGTH) {
+		const safeMaxLength = Math.max(0, Math.floor(maxContextLength));
+		if (safeMaxLength === 0 || raw.length <= safeMaxLength) {
 			return raw;
 		}
-		return `${raw.slice(0, MAX_CONTEXT_LENGTH - 1)}…`;
+		return `${raw.slice(0, safeMaxLength - 1)}…`;
 	} catch {
 		return null;
 	}
@@ -166,9 +209,10 @@ export async function recordRuntimeEvent(
 	if (!allowedLevels.has(input.level)) {
 		return;
 	}
+	const maxContextLength = await readRuntimeEventContextMaxLength(db);
 	const id = crypto.randomUUID();
 	const createdAt = input.createdAt ?? nowIso();
-	const contextJson = serializeContext(input.context ?? null);
+	const contextJson = serializeContext(input.context ?? null, maxContextLength);
 	await db
 		.prepare(
 			"INSERT INTO runtime_events (id, level, code, message, request_id, session_id, request_path, method, channel_id, token_id, model, context_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

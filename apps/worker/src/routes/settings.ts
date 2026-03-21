@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
 import {
+	ALL_CACHE_VERSION_SCOPES,
+	type CacheVersionScope,
+} from "../services/cache-version-store";
+import {
 	getCheckinSchedulerStub,
 	shouldResetLastRun,
 } from "../services/checkin-scheduler";
@@ -15,6 +19,7 @@ import {
 	getModelFailureCooldownMinutes,
 	getProxyRuntimeSettings,
 	getRetentionDays,
+	getRuntimeEventContextMaxLength,
 	getRuntimeEventLevels,
 	getRuntimeEventRetentionDays,
 	getRuntimeProxyConfig,
@@ -26,6 +31,7 @@ import {
 	setModelFailureCooldownMinutes,
 	setProxyRuntimeSettings,
 	setRetentionDays,
+	setRuntimeEventContextMaxLength,
 	setRuntimeEventLevels,
 	setRuntimeEventRetentionDays,
 	setSessionTtlHours,
@@ -54,6 +60,9 @@ settings.get("/", async (c) => {
 		c.env.DB,
 	);
 	const runtimeEventLevels = await getRuntimeEventLevels(c.env.DB);
+	const runtimeEventContextMaxLength = await getRuntimeEventContextMaxLength(
+		c.env.DB,
+	);
 	const runtimeSettings = await getProxyRuntimeSettings(c.env.DB);
 	const runtimeConfig = getRuntimeProxyConfig(c.env, runtimeSettings);
 	const cacheConfig = await getCacheConfig(c.env.DB, c.env.CACHE_VERSION_STORE);
@@ -108,6 +117,7 @@ settings.get("/", async (c) => {
 		model_failure_cooldown_minutes: modelFailureCooldownMinutes,
 		runtime_event_retention_days: runtimeEventRetentionDays,
 		runtime_event_levels: runtimeEventLevels,
+		runtime_event_context_max_length: runtimeEventContextMaxLength,
 		runtime_config: runtimeConfig,
 		runtime_settings: runtimeSettings,
 		cache_config: cacheConfig,
@@ -143,6 +153,9 @@ settings.put("/", async (c) => {
 		stream_usage_mode?: string;
 		stream_usage_max_bytes?: number;
 		stream_usage_max_parsers?: number;
+		usage_reserve_breaker_ms?: number;
+		stream_usage_parse_timeout_ms?: number;
+		usage_error_message_max_length?: number;
 		usage_queue_enabled?: boolean;
 		usage_queue_daily_limit?: number;
 		usage_queue_direct_write_ratio?: number;
@@ -180,7 +193,7 @@ settings.put("/", async (c) => {
 
 	if (body.model_failure_cooldown_minutes !== undefined) {
 		const minutes = Number(body.model_failure_cooldown_minutes);
-		if (Number.isNaN(minutes) || minutes < 1) {
+		if (Number.isNaN(minutes) || minutes < 0) {
 			return jsonError(
 				c,
 				400,
@@ -203,6 +216,20 @@ settings.put("/", async (c) => {
 			);
 		}
 		await setRuntimeEventRetentionDays(c.env.DB, days);
+		touched = true;
+	}
+
+	if (body.runtime_event_context_max_length !== undefined) {
+		const maxLength = Number(body.runtime_event_context_max_length);
+		if (Number.isNaN(maxLength) || maxLength < 0) {
+			return jsonError(
+				c,
+				400,
+				"invalid_runtime_event_context_max_length",
+				"invalid_runtime_event_context_max_length",
+			);
+		}
+		await setRuntimeEventContextMaxLength(c.env.DB, maxLength);
 		touched = true;
 	}
 
@@ -440,6 +467,48 @@ settings.put("/", async (c) => {
 		runtimeTouched = true;
 	}
 
+	if (body.proxy_usage_reserve_breaker_ms !== undefined) {
+		const breakerMs = Number(body.proxy_usage_reserve_breaker_ms);
+		if (Number.isNaN(breakerMs) || breakerMs < 0) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_usage_reserve_breaker_ms",
+				"invalid_proxy_usage_reserve_breaker_ms",
+			);
+		}
+		runtimePatch.usage_reserve_breaker_ms = Math.floor(breakerMs);
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_stream_usage_parse_timeout_ms !== undefined) {
+		const timeoutMs = Number(body.proxy_stream_usage_parse_timeout_ms);
+		if (Number.isNaN(timeoutMs) || timeoutMs < 0) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_stream_usage_parse_timeout_ms",
+				"invalid_proxy_stream_usage_parse_timeout_ms",
+			);
+		}
+		runtimePatch.stream_usage_parse_timeout_ms = Math.floor(timeoutMs);
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_usage_error_message_max_length !== undefined) {
+		const maxLength = Number(body.proxy_usage_error_message_max_length);
+		if (Number.isNaN(maxLength) || maxLength < 1) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_usage_error_message_max_length",
+				"invalid_proxy_usage_error_message_max_length",
+			);
+		}
+		runtimePatch.usage_error_message_max_length = Math.floor(maxLength);
+		runtimeTouched = true;
+	}
+
 	if (body.proxy_usage_queue_enabled !== undefined) {
 		const raw = body.proxy_usage_queue_enabled;
 		let enabled: boolean | null = null;
@@ -578,6 +647,18 @@ settings.post("/cache/refresh", async (c) => {
 		c.env.CACHE_VERSION_STORE,
 	);
 	return c.json({ ok: true });
+});
+
+settings.post("/cache/refresh/:scope", async (c) => {
+	const scopeRaw = String(c.req.param("scope") ?? "")
+		.trim()
+		.toLowerCase();
+	if (!ALL_CACHE_VERSION_SCOPES.includes(scopeRaw as CacheVersionScope)) {
+		return jsonError(c, 400, "invalid_cache_scope", "invalid_cache_scope");
+	}
+	const scope = scopeRaw as CacheVersionScope;
+	await bumpCacheVersions(c.env.DB, [scope], c.env.CACHE_VERSION_STORE);
+	return c.json({ ok: true, scope });
 });
 
 export default settings;

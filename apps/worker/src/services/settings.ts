@@ -26,6 +26,9 @@ const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 10;
 const DEFAULT_PROXY_STREAM_USAGE_MODE = "full";
 const DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES = 0;
 const DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS = 0;
+const DEFAULT_PROXY_USAGE_RESERVE_BREAKER_MS = 60_000;
+const DEFAULT_PROXY_STREAM_USAGE_PARSE_TIMEOUT_MS = 20_000;
+const DEFAULT_PROXY_USAGE_ERROR_MESSAGE_MAX_LENGTH = 320;
 const DEFAULT_CACHE_ENABLED = true;
 const DEFAULT_CACHE_VERSION = 1;
 const DEFAULT_CACHE_DASHBOARD_TTL_SECONDS = 30;
@@ -41,6 +44,7 @@ const DEFAULT_PROXY_RETRY_MAX_RETRIES = 3;
 const DEFAULT_PROXY_USAGE_QUEUE_ENABLED = true;
 const DEFAULT_USAGE_QUEUE_DAILY_LIMIT = 10000;
 const DEFAULT_USAGE_QUEUE_DIRECT_WRITE_RATIO = 0.5;
+const DEFAULT_RUNTIME_EVENT_CONTEXT_MAX_LENGTH = 16_000;
 const CACHE_CONFIG_TTL_MS = 0;
 const SETTING_SNAPSHOT_TTL_MS = 1000;
 const RETENTION_KEY = "log_retention_days";
@@ -68,11 +72,17 @@ const PROXY_RETRY_MAX_RETRIES_KEY = "proxy_retry_max_retries";
 const PROXY_STREAM_USAGE_MODE_KEY = "proxy_stream_usage_mode";
 const PROXY_STREAM_USAGE_MAX_BYTES_KEY = "proxy_stream_usage_max_bytes";
 const PROXY_STREAM_USAGE_MAX_PARSERS_KEY = "proxy_stream_usage_max_parsers";
+const PROXY_USAGE_RESERVE_BREAKER_KEY = "proxy_usage_reserve_breaker_ms";
+const PROXY_STREAM_USAGE_PARSE_TIMEOUT_KEY =
+	"proxy_stream_usage_parse_timeout_ms";
+const PROXY_USAGE_ERROR_MESSAGE_MAX_LENGTH_KEY =
+	"proxy_usage_error_message_max_length";
 const PROXY_USAGE_QUEUE_ENABLED_KEY = "proxy_usage_queue_enabled";
 const USAGE_QUEUE_DAILY_LIMIT_KEY = "usage_queue_daily_limit";
 const USAGE_QUEUE_DIRECT_WRITE_RATIO_KEY = "usage_queue_direct_write_ratio";
 const RUNTIME_EVENT_RETENTION_KEY = "runtime_event_retention_days";
 const RUNTIME_EVENT_LEVELS_KEY = "runtime_event_levels";
+const RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY = "runtime_event_context_max_length";
 
 export type RuntimeProxyConfig = {
 	upstream_timeout_ms: number;
@@ -93,6 +103,9 @@ export type ProxyRuntimeSettings = {
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
+	usage_reserve_breaker_ms: number;
+	stream_usage_parse_timeout_ms: number;
+	usage_error_message_max_length: number;
 	usage_queue_enabled: boolean;
 	usage_queue_daily_limit: number;
 	usage_queue_direct_write_ratio: number;
@@ -145,6 +158,7 @@ let modelCooldownSnapshot: SettingSnapshot<number> | null = null;
 let runtimeEventRetentionSnapshot: SettingSnapshot<number> | null = null;
 let runtimeEventLevelsSnapshot: SettingSnapshot<RuntimeEventLevel[]> | null =
 	null;
+let runtimeEventContextMaxLengthSnapshot: SettingSnapshot<number> | null = null;
 type CacheControlSnapshot<T> = {
 	value: T;
 	expiresAt: number;
@@ -398,7 +412,7 @@ export async function getProxyRuntimeSettings(
 	db: D1Database,
 ): Promise<ProxyRuntimeSettings> {
 	const settings = await getSettingsSnapshot(db);
-	const upstreamTimeout = parsePositiveSetting(
+	const upstreamTimeout = parseNonNegativeSetting(
 		settings[PROXY_UPSTREAM_TIMEOUT_KEY] ?? null,
 		DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS,
 	);
@@ -416,6 +430,18 @@ export async function getProxyRuntimeSettings(
 	const streamUsageMaxParsers = parseNonNegativeSetting(
 		settings[PROXY_STREAM_USAGE_MAX_PARSERS_KEY] ?? null,
 		DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS,
+	);
+	const usageReserveBreakerMs = parseNonNegativeSetting(
+		settings[PROXY_USAGE_RESERVE_BREAKER_KEY] ?? null,
+		DEFAULT_PROXY_USAGE_RESERVE_BREAKER_MS,
+	);
+	const streamUsageParseTimeout = parseNonNegativeSetting(
+		settings[PROXY_STREAM_USAGE_PARSE_TIMEOUT_KEY] ?? null,
+		DEFAULT_PROXY_STREAM_USAGE_PARSE_TIMEOUT_MS,
+	);
+	const usageErrorMessageMaxLength = parsePositiveSetting(
+		settings[PROXY_USAGE_ERROR_MESSAGE_MAX_LENGTH_KEY] ?? null,
+		DEFAULT_PROXY_USAGE_ERROR_MESSAGE_MAX_LENGTH,
 	);
 	const usageQueueEnabled = parseBooleanSetting(
 		settings[PROXY_USAGE_QUEUE_ENABLED_KEY] ?? null,
@@ -435,6 +461,9 @@ export async function getProxyRuntimeSettings(
 		stream_usage_mode: streamUsageMode,
 		stream_usage_max_bytes: streamUsageMaxBytes,
 		stream_usage_max_parsers: streamUsageMaxParsers,
+		usage_reserve_breaker_ms: usageReserveBreakerMs,
+		stream_usage_parse_timeout_ms: streamUsageParseTimeout,
+		usage_error_message_max_length: usageErrorMessageMaxLength,
 		usage_queue_enabled: usageQueueEnabled,
 		usage_queue_daily_limit: usageQueueDailyLimit,
 		usage_queue_direct_write_ratio: usageQueueDirectWriteRatio,
@@ -504,6 +533,33 @@ export async function setProxyRuntimeSettings(
 				db,
 				PROXY_STREAM_USAGE_MAX_PARSERS_KEY,
 				String(Math.max(0, Math.floor(update.stream_usage_max_parsers))),
+			),
+		);
+	}
+	if (update.usage_reserve_breaker_ms !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_USAGE_RESERVE_BREAKER_KEY,
+				String(Math.max(0, Math.floor(update.usage_reserve_breaker_ms))),
+			),
+		);
+	}
+	if (update.stream_usage_parse_timeout_ms !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_STREAM_USAGE_PARSE_TIMEOUT_KEY,
+				String(Math.max(0, Math.floor(update.stream_usage_parse_timeout_ms))),
+			),
+		);
+	}
+	if (update.usage_error_message_max_length !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_USAGE_ERROR_MESSAGE_MAX_LENGTH_KEY,
+				String(Math.max(1, Math.floor(update.usage_error_message_max_length))),
 			),
 		);
 	}
@@ -879,7 +935,10 @@ export async function getModelFailureCooldownMinutes(
 		modelCooldownSnapshot,
 		async () => {
 			const value = await readSetting(db, MODEL_FAILURE_COOLDOWN_KEY);
-			return parsePositiveNumber(value, DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES);
+			return parseNonNegativeSetting(
+				value,
+				DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES,
+			);
 		},
 		(next) => {
 			modelCooldownSnapshot = next;
@@ -898,6 +957,24 @@ export async function getRuntimeEventRetentionDays(
 		},
 		(next) => {
 			runtimeEventRetentionSnapshot = next;
+		},
+	);
+}
+
+export async function getRuntimeEventContextMaxLength(
+	db: D1Database,
+): Promise<number> {
+	return getCachedSetting(
+		runtimeEventContextMaxLengthSnapshot,
+		async () => {
+			const value = await readSetting(db, RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY);
+			return parseNonNegativeSetting(
+				value,
+				DEFAULT_RUNTIME_EVENT_CONTEXT_MAX_LENGTH,
+			);
+		},
+		(next) => {
+			runtimeEventContextMaxLengthSnapshot = next;
 		},
 	);
 }
@@ -939,6 +1016,16 @@ export async function setRuntimeEventRetentionDays(
 	runtimeEventRetentionSnapshot = null;
 }
 
+export async function setRuntimeEventContextMaxLength(
+	db: D1Database,
+	maxLength: number,
+): Promise<void> {
+	const value = Math.max(0, Math.floor(maxLength)).toString();
+	await upsertSetting(db, RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY, value);
+	runtimeEventContextMaxLengthSnapshot = null;
+	resetRuntimeEventLevelSnapshot();
+}
+
 export async function setRuntimeEventLevels(
 	db: D1Database,
 	levels: string[],
@@ -953,7 +1040,7 @@ export async function setModelFailureCooldownMinutes(
 	db: D1Database,
 	minutes: number,
 ): Promise<void> {
-	const value = Math.max(1, Math.floor(minutes)).toString();
+	const value = Math.max(0, Math.floor(minutes)).toString();
 	await upsertSetting(db, MODEL_FAILURE_COOLDOWN_KEY, value);
 	modelCooldownSnapshot = null;
 }
@@ -983,6 +1070,7 @@ export function resetSettingsSnapshots(): void {
 	modelCooldownSnapshot = null;
 	runtimeEventRetentionSnapshot = null;
 	runtimeEventLevelsSnapshot = null;
+	runtimeEventContextMaxLengthSnapshot = null;
 	cacheConfigSnapshot = null;
 	settingsCacheControlSnapshot = null;
 }

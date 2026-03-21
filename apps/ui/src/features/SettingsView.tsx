@@ -12,12 +12,23 @@ type SettingsViewProps = {
 	isSaving: boolean;
 	cacheConfig?: CacheConfig | null;
 	isRefreshingCache?: boolean;
+	isRefreshingCacheScope?: (scope: CacheRefreshScope) => boolean;
 	runtimeConfig?: RuntimeProxyConfig | null;
 	usageQueueStatus?: UsageQueueStatus | null;
 	onSubmit: (event: Event) => void;
 	onFormChange: (patch: Partial<SettingsForm>) => void;
 	onRefreshCache: () => void;
+	onRefreshCacheScope?: (scope: CacheRefreshScope) => void;
 };
+
+type CacheRefreshScope =
+	| "dashboard"
+	| "usage"
+	| "models"
+	| "tokens"
+	| "channels"
+	| "call_tokens"
+	| "settings";
 
 const streamUsageModes = [
 	{ value: "full", label: "完整", hint: "全量解析" },
@@ -46,11 +57,13 @@ export const SettingsView = ({
 	isSaving,
 	cacheConfig,
 	isRefreshingCache,
+	isRefreshingCacheScope,
 	runtimeConfig,
 	usageQueueStatus,
 	onSubmit,
 	onFormChange,
 	onRefreshCache,
+	onRefreshCacheScope,
 }: SettingsViewProps) => {
 	const queueBoundValue =
 		runtimeConfig === null || runtimeConfig === undefined
@@ -79,6 +92,7 @@ export const SettingsView = ({
 			title: "面板缓存",
 			hint: "0 表示关闭该接口缓存。",
 			version: cacheConfig?.version_dashboard ?? "-",
+			scope: "dashboard" as const,
 		},
 		{
 			key: "cache_ttl_usage_seconds",
@@ -86,6 +100,7 @@ export const SettingsView = ({
 			title: "日志缓存",
 			hint: "日志查询建议设置较短 TTL。",
 			version: cacheConfig?.version_usage ?? "-",
+			scope: "usage" as const,
 		},
 		{
 			key: "cache_ttl_models_seconds",
@@ -93,6 +108,7 @@ export const SettingsView = ({
 			title: "模型缓存",
 			hint: "",
 			version: cacheConfig?.version_models ?? "-",
+			scope: "models" as const,
 		},
 		{
 			key: "cache_ttl_tokens_seconds",
@@ -100,6 +116,7 @@ export const SettingsView = ({
 			title: "Token 鉴权缓存",
 			hint: "禁用令牌会自动失效，不影响即时生效。",
 			version: cacheConfig?.version_tokens ?? "-",
+			scope: "tokens" as const,
 		},
 		{
 			key: "cache_ttl_channels_seconds",
@@ -107,6 +124,7 @@ export const SettingsView = ({
 			title: "渠道缓存",
 			hint: "",
 			version: cacheConfig?.version_channels ?? "-",
+			scope: "channels" as const,
 		},
 		{
 			key: "cache_ttl_call_tokens_seconds",
@@ -114,6 +132,7 @@ export const SettingsView = ({
 			title: "调用令牌缓存",
 			hint: "",
 			version: cacheConfig?.version_call_tokens ?? "-",
+			scope: "call_tokens" as const,
 		},
 		{
 			key: "cache_ttl_settings_seconds",
@@ -121,6 +140,7 @@ export const SettingsView = ({
 			title: "设置缓存",
 			hint: "",
 			version: cacheConfig?.version_settings ?? "-",
+			scope: "settings" as const,
 		},
 	] as const;
 
@@ -136,8 +156,8 @@ export const SettingsView = ({
 			<form class="app-settings-panel" onSubmit={onSubmit}>
 				<Card class="app-settings-group">
 					<div class="app-settings-group__header">
-						<h4 class="app-settings-group__title">基础设置</h4>
-						<p class="app-settings-group__caption">账号与基础策略</p>
+						<h4 class="app-settings-group__title">基础运行</h4>
+						<p class="app-settings-group__caption">会话与调度策略</p>
 					</div>
 					<div class="app-settings-list">
 						<div class="app-settings-row">
@@ -159,71 +179,6 @@ export const SettingsView = ({
 									onFormChange({ log_retention_days: target?.value ?? "" });
 								}}
 							/>
-						</div>
-						<div class="app-settings-row">
-							<div class="app-settings-row__main">
-								<label
-									class="app-settings-row__label"
-									for="runtime-event-retention"
-								>
-									系统日志保留天数
-								</label>
-								<p class="app-settings-row__hint">
-									用于系统日志模块，按天自动清理。
-								</p>
-							</div>
-							<Input
-								class="app-settings-row__control app-settings-row__control--compact"
-								id="runtime-event-retention"
-								name="runtime_event_retention_days"
-								type="number"
-								min="1"
-								value={settingsForm.runtime_event_retention_days}
-								onInput={(event) => {
-									const target = event.currentTarget as HTMLInputElement | null;
-									onFormChange({
-										runtime_event_retention_days: target?.value ?? "",
-									});
-								}}
-							/>
-						</div>
-						<div class="app-settings-row app-settings-row--stack">
-							<div class="app-settings-row__main">
-								<span class="app-settings-row__label">系统日志写入等级</span>
-								<p class="app-settings-row__hint">
-									可不选；不选表示完全关闭系统日志写入。
-								</p>
-							</div>
-							<div class="app-segment app-settings-row__control app-settings-row__control--full">
-								{runtimeEventLevelOptions.map((option) => {
-									const active = settingsForm.runtime_event_levels.includes(
-										option.value,
-									);
-									return (
-										<button
-											aria-pressed={active}
-											class={`app-segment__button ${
-												active ? "app-segment__button--active" : ""
-											}`}
-											key={option.value}
-											type="button"
-											onClick={() => {
-												const next = active
-													? settingsForm.runtime_event_levels.filter(
-															(level) => level !== option.value,
-														)
-													: [
-															...settingsForm.runtime_event_levels,
-															option.value,
-														];
-												onFormChange({ runtime_event_levels: next });
-											}}
-										>
-											<span>{option.label}</span>
-										</button>
-									);
-								})}
-							</div>
 						</div>
 						<div class="app-settings-row">
 							<div class="app-settings-row__main">
@@ -273,7 +228,7 @@ export const SettingsView = ({
 									失败冷却（分钟）
 								</label>
 								<p class="app-settings-row__hint">
-									同一模型失败后在该时间内跳过对应渠道。
+									同一模型失败后在该时间内跳过对应渠道，0 表示关闭冷却。
 								</p>
 							</div>
 							<Input
@@ -281,7 +236,7 @@ export const SettingsView = ({
 								id="failure-cooldown"
 								name="model_failure_cooldown_minutes"
 								type="number"
-								min="1"
+								min="0"
 								value={settingsForm.model_failure_cooldown_minutes}
 								onInput={(event) => {
 									const target = event.currentTarget as HTMLInputElement | null;
@@ -322,8 +277,8 @@ export const SettingsView = ({
 
 				<Card class="app-settings-group">
 					<div class="app-settings-group__header">
-						<h4 class="app-settings-group__title">解析与请求</h4>
-						<p class="app-settings-group__caption">代理调用链路与流式策略</p>
+						<h4 class="app-settings-group__title">代理请求</h4>
+						<p class="app-settings-group__caption">上游调用与重试策略</p>
 					</div>
 					<div class="app-settings-list">
 						<div class="app-settings-row">
@@ -376,6 +331,42 @@ export const SettingsView = ({
 								}}
 							/>
 						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-usage-breaker"
+								>
+									预占熔断时长（毫秒）
+								</label>
+								<p class="app-settings-row__hint">
+									预占失败后在该时长内跳过预占。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-usage-breaker"
+								name="proxy_usage_reserve_breaker_ms"
+								type="number"
+								min="0"
+								value={settingsForm.proxy_usage_reserve_breaker_ms}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_usage_reserve_breaker_ms: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+					</div>
+				</Card>
+
+				<Card class="app-settings-group">
+					<div class="app-settings-group__header">
+						<h4 class="app-settings-group__title">解析</h4>
+						<p class="app-settings-group__caption">流式解析参数</p>
+					</div>
+					<div class="app-settings-list">
 						<div class="app-settings-row app-settings-row--stack">
 							<div class="app-settings-row__main">
 								<span class="app-settings-row__label">流式 usage 解析模式</span>
@@ -462,13 +453,67 @@ export const SettingsView = ({
 								}}
 							/>
 						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-stream-usage-parse-timeout"
+								>
+									流式解析超时（毫秒）
+								</label>
+								<p class="app-settings-row__hint">
+									SSE usage 解析任务的超时时间。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-stream-usage-parse-timeout"
+								name="proxy_stream_usage_parse_timeout_ms"
+								type="number"
+								min="0"
+								value={settingsForm.proxy_stream_usage_parse_timeout_ms}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_stream_usage_parse_timeout_ms: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-usage-error-max-length"
+								>
+									错误消息最大长度
+								</label>
+								<p class="app-settings-row__hint">
+									usage 错误信息写入日志前的截断长度。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-usage-error-max-length"
+								name="proxy_usage_error_message_max_length"
+								type="number"
+								min="1"
+								value={settingsForm.proxy_usage_error_message_max_length}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_usage_error_message_max_length: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
 					</div>
 				</Card>
 
 				<Card class="app-settings-group">
 					<div class="app-settings-group__header">
-						<h4 class="app-settings-group__title">队列设置</h4>
-						<p class="app-settings-group__caption">日志写入队列策略与状态</p>
+						<h4 class="app-settings-group__title">用量队列</h4>
+						<p class="app-settings-group__caption">日志写入分流与状态</p>
 					</div>
 					<div class="app-settings-list">
 						<div class="app-settings-row">
@@ -565,7 +610,109 @@ export const SettingsView = ({
 
 				<Card class="app-settings-group">
 					<div class="app-settings-group__header">
-						<h4 class="app-settings-group__title">缓存设置</h4>
+						<h4 class="app-settings-group__title">系统日志</h4>
+						<p class="app-settings-group__caption">写入等级与存储策略</p>
+					</div>
+					<div class="app-settings-list">
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="runtime-event-retention"
+								>
+									系统日志保留天数
+								</label>
+								<p class="app-settings-row__hint">
+									用于系统日志模块，按天自动清理。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="runtime-event-retention"
+								name="runtime_event_retention_days"
+								type="number"
+								min="1"
+								value={settingsForm.runtime_event_retention_days}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										runtime_event_retention_days: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+						<div class="app-settings-row app-settings-row--stack">
+							<div class="app-settings-row__main">
+								<span class="app-settings-row__label">系统日志写入等级</span>
+								<p class="app-settings-row__hint">
+									可不选；不选表示完全关闭系统日志写入。
+								</p>
+							</div>
+							<div class="app-segment app-settings-row__control app-settings-row__control--full">
+								{runtimeEventLevelOptions.map((option) => {
+									const active = settingsForm.runtime_event_levels.includes(
+										option.value,
+									);
+									return (
+										<button
+											aria-pressed={active}
+											class={`app-segment__button ${
+												active ? "app-segment__button--active" : ""
+											}`}
+											key={option.value}
+											type="button"
+											onClick={() => {
+												const next = active
+													? settingsForm.runtime_event_levels.filter(
+															(level) => level !== option.value,
+														)
+													: [
+															...settingsForm.runtime_event_levels,
+															option.value,
+														];
+												onFormChange({ runtime_event_levels: next });
+											}}
+										>
+											<span>{option.label}</span>
+										</button>
+									);
+								})}
+							</div>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="runtime-event-context-max-length"
+								>
+									系统日志上下文最大长度
+								</label>
+								<p class="app-settings-row__hint">
+									context_json 写入前截断长度，0 表示不截断。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="runtime-event-context-max-length"
+								name="runtime_event_context_max_length"
+								type="number"
+								min="0"
+								step="1"
+								value={settingsForm.runtime_event_context_max_length}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										runtime_event_context_max_length: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+					</div>
+				</Card>
+
+				<Card class="app-settings-group">
+					<div class="app-settings-group__header">
+						<h4 class="app-settings-group__title">缓存</h4>
 						<p class="app-settings-group__caption">控制各接口缓存策略与版本</p>
 					</div>
 					<div class="app-settings-list">
@@ -587,36 +734,50 @@ export const SettingsView = ({
 						</div>
 					</div>
 					<div class="app-settings-cache-grid">
-						{cacheItems.map((item) => (
-							<div class="app-settings-cache-card" key={item.id}>
-								<div class="app-settings-cache-card__title">{item.title}</div>
-								<label class="app-settings-cache-card__label" for={item.id}>
-									TTL（秒）
-								</label>
-								<Input
-									id={item.id}
-									name={item.key}
-									type="number"
-									min="0"
-									value={settingsForm[item.key]}
-									onInput={(event) => {
-										const target =
-											event.currentTarget as HTMLInputElement | null;
-										onFormChange({
-											[item.key]: target?.value ?? "",
-										} as Partial<SettingsForm>);
-									}}
-								/>
-								{item.hint ? (
-									<p class="app-settings-cache-card__hint">{item.hint}</p>
-								) : (
-									<div class="h-[18px]" />
-								)}
-								<div class="app-settings-cache-card__version">
-									版本：{item.version}
+						{cacheItems.map((item) => {
+							const refreshing = isRefreshingCacheScope?.(item.scope) ?? false;
+							return (
+								<div class="app-settings-cache-card" key={item.id}>
+									<div class="app-settings-cache-card__title">{item.title}</div>
+									<label class="app-settings-cache-card__label" for={item.id}>
+										TTL（秒）
+									</label>
+									<Input
+										id={item.id}
+										name={item.key}
+										type="number"
+										min="0"
+										value={settingsForm[item.key]}
+										onInput={(event) => {
+											const target =
+												event.currentTarget as HTMLInputElement | null;
+											onFormChange({
+												[item.key]: target?.value ?? "",
+											} as Partial<SettingsForm>);
+										}}
+									/>
+									{item.hint ? (
+										<p class="app-settings-cache-card__hint">{item.hint}</p>
+									) : (
+										<div class="h-[18px]" />
+									)}
+									<div class="app-settings-cache-card__actions">
+										<div class="app-settings-cache-card__version">
+											版本：{item.version}
+										</div>
+										<Button
+											variant="ghost"
+											size="sm"
+											type="button"
+											disabled={refreshing}
+											onClick={() => onRefreshCacheScope?.(item.scope)}
+										>
+											{refreshing ? "刷新中..." : "刷新此项"}
+										</Button>
+									</div>
 								</div>
-							</div>
-						))}
+							);
+						})}
 					</div>
 				</Card>
 
@@ -628,7 +789,7 @@ export const SettingsView = ({
 						disabled={isRefreshingCache}
 						onClick={onRefreshCache}
 					>
-						{isRefreshingCache ? "刷新中..." : "刷新缓存"}
+						{isRefreshingCache ? "刷新中..." : "刷新全部缓存"}
 					</Button>
 					<Button variant="primary" size="lg" type="submit" disabled={isSaving}>
 						{isSaving ? "保存中..." : "保存设置"}

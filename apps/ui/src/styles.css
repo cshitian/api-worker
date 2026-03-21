@@ -1340,6 +1340,14 @@ body {
 	color: var(--app-ink-muted);
 }
 
+.app-settings-cache-card__actions {
+	margin-top: 8px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
 .app-settings-footer {
 	display: flex;
 	align-items: center;
@@ -1397,6 +1405,13 @@ body {
 		flex-direction: column-reverse;
 	}
 	.app-settings-footer .app-button {
+		width: 100%;
+	}
+	.app-settings-cache-card__actions {
+		flex-direction: column;
+		align-items: stretch;
+	}
+	.app-settings-cache-card__actions .app-button {
 		width: 100%;
 	}
 	.app-page-size-control {

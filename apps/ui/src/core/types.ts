@@ -161,6 +161,7 @@ export type Settings = {
 	runtime_config?: RuntimeProxyConfig;
 	cache_config?: CacheConfig;
 	usage_queue_status?: UsageQueueStatus | null;
+	runtime_event_context_max_length?: number;
 };
 
 export type RuntimeProxySettings = {
@@ -169,6 +170,9 @@ export type RuntimeProxySettings = {
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
+	usage_reserve_breaker_ms: number;
+	stream_usage_parse_timeout_ms: number;
+	usage_error_message_max_length: number;
 	usage_queue_enabled: boolean;
 	usage_queue_daily_limit: number;
 	usage_queue_direct_write_ratio: number;
@@ -267,11 +271,15 @@ export type SettingsForm = {
 	admin_password: string;
 	checkin_schedule_time: string;
 	model_failure_cooldown_minutes: string;
+	runtime_event_context_max_length: string;
 	proxy_upstream_timeout_ms: string;
 	proxy_retry_max_retries: string;
 	proxy_stream_usage_mode: string;
 	proxy_stream_usage_max_bytes: string;
 	proxy_stream_usage_max_parsers: string;
+	proxy_usage_reserve_breaker_ms: string;
+	proxy_stream_usage_parse_timeout_ms: string;
+	proxy_usage_error_message_max_length: string;
 	proxy_usage_queue_enabled: boolean;
 	usage_queue_daily_limit: string;
 	usage_queue_direct_write_ratio: string;

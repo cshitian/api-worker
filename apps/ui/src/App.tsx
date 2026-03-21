@@ -749,6 +749,9 @@ const App = () => {
 			model_failure_cooldown_minutes: String(
 				data.settings.model_failure_cooldown_minutes ?? 10,
 			),
+			runtime_event_context_max_length: String(
+				data.settings.runtime_event_context_max_length ?? 16000,
+			),
 			proxy_upstream_timeout_ms: String(
 				runtimeSettings?.upstream_timeout_ms ?? 30000,
 			),
@@ -759,6 +762,15 @@ const App = () => {
 			),
 			proxy_stream_usage_max_parsers: String(
 				runtimeSettings?.stream_usage_max_parsers ?? 0,
+			),
+			proxy_usage_reserve_breaker_ms: String(
+				runtimeSettings?.usage_reserve_breaker_ms ?? 60000,
+			),
+			proxy_stream_usage_parse_timeout_ms: String(
+				runtimeSettings?.stream_usage_parse_timeout_ms ?? 20000,
+			),
+			proxy_usage_error_message_max_length: String(
+				runtimeSettings?.usage_error_message_max_length ?? 320,
 			),
 			proxy_usage_queue_enabled: runtimeSettings?.usage_queue_enabled ?? true,
 			usage_queue_daily_limit: String(
@@ -1504,6 +1516,9 @@ const App = () => {
 			const failureCooldownMinutes = Number(
 				settingsForm.model_failure_cooldown_minutes,
 			);
+			const runtimeEventContextMaxLength = Number(
+				settingsForm.runtime_event_context_max_length,
+			);
 			const upstreamTimeoutMs = Number(settingsForm.proxy_upstream_timeout_ms);
 			const retryMaxRetries = Number(settingsForm.proxy_retry_max_retries);
 			const streamUsageMode = settingsForm.proxy_stream_usage_mode
@@ -1514,6 +1529,15 @@ const App = () => {
 			);
 			const streamUsageMaxParsers = Number(
 				settingsForm.proxy_stream_usage_max_parsers,
+			);
+			const usageReserveBreakerMs = Number(
+				settingsForm.proxy_usage_reserve_breaker_ms,
+			);
+			const streamUsageParseTimeoutMs = Number(
+				settingsForm.proxy_stream_usage_parse_timeout_ms,
+			);
+			const usageErrorMessageMaxLength = Number(
+				settingsForm.proxy_usage_error_message_max_length,
 			);
 			const runtimeEventLevels = settingsForm.runtime_event_levels
 				.map((item) => item.trim().toLowerCase())
@@ -1544,8 +1568,16 @@ const App = () => {
 				pushNotice("warning", "请填写有效的日志保留天数与会话时长");
 				return;
 			}
-			if (Number.isNaN(failureCooldownMinutes) || failureCooldownMinutes < 1) {
-				pushNotice("warning", "失败冷却需为正整数");
+			if (Number.isNaN(failureCooldownMinutes) || failureCooldownMinutes < 0) {
+				pushNotice("warning", "失败冷却需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(runtimeEventContextMaxLength) ||
+				runtimeEventContextMaxLength < 0 ||
+				!Number.isInteger(runtimeEventContextMaxLength)
+			) {
+				pushNotice("warning", "系统日志上下文最大长度需为非负整数");
 				return;
 			}
 			if (Number.isNaN(upstreamTimeoutMs) || upstreamTimeoutMs < 0) {
@@ -1570,6 +1602,22 @@ const App = () => {
 			}
 			if (Number.isNaN(streamUsageMaxParsers) || streamUsageMaxParsers < 0) {
 				pushNotice("warning", "并发上限需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(usageReserveBreakerMs) ||
+				usageReserveBreakerMs < 0 ||
+				Number.isNaN(streamUsageParseTimeoutMs) ||
+				streamUsageParseTimeoutMs < 0
+			) {
+				pushNotice("warning", "队列/解析参数需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(usageErrorMessageMaxLength) ||
+				usageErrorMessageMaxLength < 1
+			) {
+				pushNotice("warning", "错误消息最大长度需为正整数");
 				return;
 			}
 			if (Number.isNaN(usageQueueDailyLimit) || usageQueueDailyLimit < 0) {
@@ -1612,10 +1660,14 @@ const App = () => {
 				return;
 			}
 			startAction(actionKey);
-			const payload: Record<string, number | string | boolean | string[]> = {
+			const payload: Record<
+				string,
+				number | string | boolean | string[] | number[]
+			> = {
 				log_retention_days: retention,
 				runtime_event_retention_days: runtimeEventRetention,
 				runtime_event_levels: runtimeEventLevels,
+				runtime_event_context_max_length: runtimeEventContextMaxLength,
 				session_ttl_hours: sessionTtlHours,
 				checkin_schedule_time:
 					settingsForm.checkin_schedule_time.trim() || "00:10",
@@ -1625,6 +1677,9 @@ const App = () => {
 				proxy_stream_usage_mode: streamUsageMode,
 				proxy_stream_usage_max_bytes: streamUsageMaxBytes,
 				proxy_stream_usage_max_parsers: streamUsageMaxParsers,
+				proxy_usage_reserve_breaker_ms: usageReserveBreakerMs,
+				proxy_stream_usage_parse_timeout_ms: streamUsageParseTimeoutMs,
+				proxy_usage_error_message_max_length: usageErrorMessageMaxLength,
 				proxy_usage_queue_enabled: settingsForm.proxy_usage_queue_enabled,
 				usage_queue_daily_limit: usageQueueDailyLimit,
 				usage_queue_direct_write_ratio: usageQueueDirectRatio,
@@ -1689,6 +1744,43 @@ const App = () => {
 		pushNotice,
 		startAction,
 	]);
+
+	const handleCacheScopeRefresh = useCallback(
+		async (scope: string) => {
+			const normalizedScope = scope.trim().toLowerCase();
+			if (!normalizedScope) {
+				return;
+			}
+			const actionKey = buildActionKey(
+				"settings:cache:refresh",
+				normalizedScope,
+			);
+			if (isActionPending(actionKey)) {
+				return;
+			}
+			startAction(actionKey);
+			try {
+				await apiFetch(
+					`/api/settings/cache/refresh/${encodeURIComponent(normalizedScope)}`,
+					{ method: "POST" },
+				);
+				await loadSettings();
+				pushNotice("success", "缓存已刷新");
+			} catch (error) {
+				pushNotice("error", (error as Error).message);
+			} finally {
+				endAction(actionKey);
+			}
+		},
+		[
+			apiFetch,
+			endAction,
+			isActionPending,
+			loadSettings,
+			pushNotice,
+			startAction,
+		],
+	);
 
 	const handleSiteDelete = useCallback(
 		async (id: string) => {
@@ -2176,6 +2268,10 @@ const App = () => {
 					onSubmit={handleSettingsSubmit}
 					onFormChange={handleSettingsFormChange}
 					onRefreshCache={handleCacheRefresh}
+					onRefreshCacheScope={handleCacheScopeRefresh}
+					isRefreshingCacheScope={(scope) =>
+						isActionPending(buildActionKey("settings:cache:refresh", scope))
+					}
 				/>
 			);
 		}
