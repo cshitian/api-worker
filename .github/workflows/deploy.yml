@@ -372,7 +372,14 @@ jobs:
             exit 1
           fi
 
-          sed -i -E '/binding = "KV_HOT"/{n;s/(id = ")[^"]+(")/\1'"$KV_ID"'\2/;}' apps/worker/wrangler.toml
+          sed -i -E '/binding = "KV_HOT"/,/^\[\[/{s/(id = ")[^"]+(")/\1'"$KV_ID"'\2/;}' apps/worker/wrangler.toml
+          KV_CONFIG_ID=$(grep -A4 'binding = "KV_HOT"' apps/worker/wrangler.toml | grep -m1 -oP '(?<=id = ")[^"]+')
+          if [ "$KV_CONFIG_ID" != "$KV_ID" ]; then
+            echo "❌ KV_HOT 写回失败：期望 $KV_ID，实际 ${KV_CONFIG_ID:-<empty>}"
+            echo "当前 KV_HOT 配置片段："
+            grep -A4 'binding = "KV_HOT"' apps/worker/wrangler.toml || true
+            exit 1
+          fi
           echo "kv_hot_id=$KV_ID" >> $GITHUB_ENV
           echo "✅ KV Namespace 就绪: $KV_ID"
 
@@ -568,7 +575,14 @@ jobs:
             exit 1
           fi
 
-          sed -i -E '/binding = "KV_HOT"/{n;s/(id = ")[^"]+(")/\1'"$KV_ID"'\2/;}' apps/worker/wrangler.toml
+          sed -i -E '/binding = "KV_HOT"/,/^\[\[/{s/(id = ")[^"]+(")/\1'"$KV_ID"'\2/;}' apps/worker/wrangler.toml
+          KV_CONFIG_ID=$(grep -A4 'binding = "KV_HOT"' apps/worker/wrangler.toml | grep -m1 -oP '(?<=id = ")[^"]+')
+          if [ "$KV_CONFIG_ID" != "$KV_ID" ]; then
+            echo "❌ KV_HOT 写回失败：期望 $KV_ID，实际 ${KV_CONFIG_ID:-<empty>}"
+            echo "当前 KV_HOT 配置片段："
+            grep -A4 'binding = "KV_HOT"' apps/worker/wrangler.toml || true
+            exit 1
+          fi
           echo "kv_hot_id=$KV_ID" >> $GITHUB_ENV
           echo "✅ KV Namespace 就绪: $KV_ID"
 
