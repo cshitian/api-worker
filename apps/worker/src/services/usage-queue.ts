@@ -7,6 +7,7 @@ import {
 	recordChannelModelError,
 	upsertChannelModelCapabilities,
 } from "./channel-model-capabilities";
+import { insertAttemptEvent, type AttemptLogInput } from "./attempt-events";
 import type { UsageInput } from "./usage";
 import { recordUsage } from "./usage";
 
@@ -31,6 +32,10 @@ export type UsageQueueEvent =
 				errorCode: string;
 				nowSeconds?: number;
 			};
+	  }
+	| {
+			type: "attempt_log";
+			payload: AttemptLogInput;
 	  };
 
 type QueueMessage<T> = {
@@ -78,6 +83,10 @@ export async function processUsageQueueEvent(
 			event.payload.errorCode,
 			nowSeconds,
 		);
+		return;
+	}
+	if (event.type === "attempt_log") {
+		await insertAttemptEvent(db, event.payload);
 	}
 }
 

@@ -10,12 +10,6 @@ import {
 	type CacheVersionScope,
 	readCacheVersionsFromStore,
 } from "./cache-version-store";
-import {
-	normalizeRuntimeEventLevels,
-	RUNTIME_EVENT_LEVEL_VALUES,
-	type RuntimeEventLevel,
-	resetRuntimeEventLevelSnapshot,
-} from "./runtime-events";
 
 const DEFAULT_LOG_RETENTION_DAYS = 30;
 const DEFAULT_SESSION_TTL_HOURS = 12;
@@ -37,13 +31,13 @@ const DEFAULT_CACHE_TOKENS_TTL_SECONDS = 15;
 const DEFAULT_CACHE_CHANNELS_TTL_SECONDS = 15;
 const DEFAULT_CACHE_CALL_TOKENS_TTL_SECONDS = 15;
 const DEFAULT_CACHE_SETTINGS_TTL_SECONDS = 30;
-const DEFAULT_RUNTIME_EVENT_RETENTION_DAYS = 30;
 const DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS = 30000;
 const DEFAULT_PROXY_RETRY_MAX_RETRIES = 3;
 const DEFAULT_PROXY_USAGE_QUEUE_ENABLED = true;
 const DEFAULT_USAGE_QUEUE_DAILY_LIMIT = 10000;
 const DEFAULT_USAGE_QUEUE_DIRECT_WRITE_RATIO = 0.5;
-const DEFAULT_RUNTIME_EVENT_CONTEXT_MAX_LENGTH = 16_000;
+const DEFAULT_ATTEMPT_LOG_ENABLED = true;
+const DEFAULT_ATTEMPT_LOG_RETENTION_DAYS = 30;
 const CACHE_CONFIG_TTL_MS = 0;
 const SETTING_SNAPSHOT_TTL_MS = 1000;
 const RETENTION_KEY = "log_retention_days";
@@ -81,9 +75,8 @@ const PROXY_STREAM_OPTIONS_CAPABILITY_TTL_KEY =
 const PROXY_USAGE_QUEUE_ENABLED_KEY = "proxy_usage_queue_enabled";
 const USAGE_QUEUE_DAILY_LIMIT_KEY = "usage_queue_daily_limit";
 const USAGE_QUEUE_DIRECT_WRITE_RATIO_KEY = "usage_queue_direct_write_ratio";
-const RUNTIME_EVENT_RETENTION_KEY = "runtime_event_retention_days";
-const RUNTIME_EVENT_LEVELS_KEY = "runtime_event_levels";
-const RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY = "runtime_event_context_max_length";
+const ATTEMPT_LOG_ENABLED_KEY = "attempt_log_enabled";
+const ATTEMPT_LOG_RETENTION_DAYS_KEY = "attempt_log_retention_days";
 
 export type RuntimeProxyConfig = {
 	upstream_timeout_ms: number;
@@ -96,6 +89,8 @@ export type RuntimeProxyConfig = {
 	usage_queue_enabled: boolean;
 	usage_queue_daily_limit: number;
 	usage_queue_direct_write_ratio: number;
+	attempt_log_enabled: boolean;
+	attempt_log_retention_days: number;
 	usage_queue_bound: boolean;
 	usage_queue_active: boolean;
 };
@@ -114,6 +109,8 @@ export type ProxyRuntimeSettings = {
 	usage_queue_enabled: boolean;
 	usage_queue_daily_limit: number;
 	usage_queue_direct_write_ratio: number;
+	attempt_log_enabled: boolean;
+	attempt_log_retention_days: number;
 };
 
 export type CacheConfig = {
@@ -160,10 +157,6 @@ let sessionTtlSnapshot: SettingSnapshot<number> | null = null;
 let adminPasswordSnapshot: SettingSnapshot<string | null> | null = null;
 let checkinScheduleSnapshot: SettingSnapshot<string> | null = null;
 let modelCooldownSnapshot: SettingSnapshot<number> | null = null;
-let runtimeEventRetentionSnapshot: SettingSnapshot<number> | null = null;
-let runtimeEventLevelsSnapshot: SettingSnapshot<RuntimeEventLevel[]> | null =
-	null;
-let runtimeEventContextMaxLengthSnapshot: SettingSnapshot<number> | null = null;
 type CacheControlSnapshot<T> = {
 	value: T;
 	expiresAt: number;
@@ -446,6 +439,14 @@ export async function getProxyRuntimeSettings(
 		settings[USAGE_QUEUE_DIRECT_WRITE_RATIO_KEY] ?? null,
 		DEFAULT_USAGE_QUEUE_DIRECT_WRITE_RATIO,
 	);
+	const attemptLogEnabled = parseBooleanSetting(
+		settings[ATTEMPT_LOG_ENABLED_KEY] ?? null,
+		DEFAULT_ATTEMPT_LOG_ENABLED,
+	);
+	const attemptLogRetentionDays = parsePositiveSetting(
+		settings[ATTEMPT_LOG_RETENTION_DAYS_KEY] ?? null,
+		DEFAULT_ATTEMPT_LOG_RETENTION_DAYS,
+	);
 	return {
 		upstream_timeout_ms: upstreamTimeout,
 		retry_max_retries: retryMaxRetries,
@@ -460,6 +461,8 @@ export async function getProxyRuntimeSettings(
 		usage_queue_enabled: usageQueueEnabled,
 		usage_queue_daily_limit: usageQueueDailyLimit,
 		usage_queue_direct_write_ratio: usageQueueDirectWriteRatio,
+		attempt_log_enabled: attemptLogEnabled,
+		attempt_log_retention_days: attemptLogRetentionDays,
 	};
 }
 
@@ -602,6 +605,24 @@ export async function setProxyRuntimeSettings(
 				db,
 				USAGE_QUEUE_DIRECT_WRITE_RATIO_KEY,
 				String(update.usage_queue_direct_write_ratio),
+			),
+		);
+	}
+	if (update.attempt_log_enabled !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				ATTEMPT_LOG_ENABLED_KEY,
+				update.attempt_log_enabled ? "1" : "0",
+			),
+		);
+	}
+	if (update.attempt_log_retention_days !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				ATTEMPT_LOG_RETENTION_DAYS_KEY,
+				String(Math.max(1, Math.floor(update.attempt_log_retention_days))),
 			),
 		);
 	}
@@ -950,94 +971,11 @@ export async function getModelFailureCooldownMinutes(
 	);
 }
 
-export async function getRuntimeEventRetentionDays(
+export async function getAttemptLogRetentionDays(
 	db: D1Database,
 ): Promise<number> {
-	return getCachedSetting(
-		runtimeEventRetentionSnapshot,
-		async () => {
-			const value = await readSetting(db, RUNTIME_EVENT_RETENTION_KEY);
-			return parsePositiveNumber(value, DEFAULT_RUNTIME_EVENT_RETENTION_DAYS);
-		},
-		(next) => {
-			runtimeEventRetentionSnapshot = next;
-		},
-	);
-}
-
-export async function getRuntimeEventContextMaxLength(
-	db: D1Database,
-): Promise<number> {
-	return getCachedSetting(
-		runtimeEventContextMaxLengthSnapshot,
-		async () => {
-			const value = await readSetting(db, RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY);
-			return parseNonNegativeSetting(
-				value,
-				DEFAULT_RUNTIME_EVENT_CONTEXT_MAX_LENGTH,
-			);
-		},
-		(next) => {
-			runtimeEventContextMaxLengthSnapshot = next;
-		},
-	);
-}
-
-function parseRuntimeEventLevelsSetting(
-	value: string | null,
-): RuntimeEventLevel[] {
-	if (value === null || value === undefined) {
-		return [...RUNTIME_EVENT_LEVEL_VALUES];
-	}
-	const raw = value.trim();
-	if (!raw) {
-		return [];
-	}
-	return normalizeRuntimeEventLevels(raw.split(","));
-}
-
-export async function getRuntimeEventLevels(
-	db: D1Database,
-): Promise<RuntimeEventLevel[]> {
-	return getCachedSetting(
-		runtimeEventLevelsSnapshot,
-		async () => {
-			const value = await readSetting(db, RUNTIME_EVENT_LEVELS_KEY);
-			return parseRuntimeEventLevelsSetting(value);
-		},
-		(next) => {
-			runtimeEventLevelsSnapshot = next;
-		},
-	);
-}
-
-export async function setRuntimeEventRetentionDays(
-	db: D1Database,
-	days: number,
-): Promise<void> {
-	const value = Math.max(1, Math.floor(days)).toString();
-	await upsertSetting(db, RUNTIME_EVENT_RETENTION_KEY, value);
-	runtimeEventRetentionSnapshot = null;
-}
-
-export async function setRuntimeEventContextMaxLength(
-	db: D1Database,
-	maxLength: number,
-): Promise<void> {
-	const value = Math.max(0, Math.floor(maxLength)).toString();
-	await upsertSetting(db, RUNTIME_EVENT_CONTEXT_MAX_LENGTH_KEY, value);
-	runtimeEventContextMaxLengthSnapshot = null;
-	resetRuntimeEventLevelSnapshot();
-}
-
-export async function setRuntimeEventLevels(
-	db: D1Database,
-	levels: string[],
-): Promise<void> {
-	const normalized = normalizeRuntimeEventLevels(levels);
-	await upsertSetting(db, RUNTIME_EVENT_LEVELS_KEY, normalized.join(","));
-	runtimeEventLevelsSnapshot = null;
-	resetRuntimeEventLevelSnapshot();
+	const value = await readSetting(db, ATTEMPT_LOG_RETENTION_DAYS_KEY);
+	return parsePositiveNumber(value, DEFAULT_ATTEMPT_LOG_RETENTION_DAYS);
 }
 
 export async function setModelFailureCooldownMinutes(
@@ -1072,9 +1010,6 @@ export function resetSettingsSnapshots(): void {
 	adminPasswordSnapshot = null;
 	checkinScheduleSnapshot = null;
 	modelCooldownSnapshot = null;
-	runtimeEventRetentionSnapshot = null;
-	runtimeEventLevelsSnapshot = null;
-	runtimeEventContextMaxLengthSnapshot = null;
 	cacheConfigSnapshot = null;
 	settingsCacheControlSnapshot = null;
 }

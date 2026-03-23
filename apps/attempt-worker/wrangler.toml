@@ -1,0 +1,13 @@
+name = "attempt-worker"
+main = "src/index.ts"
+compatibility_date = "2026-02-14"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+
+[placement]
+mode = "smart"
+

@@ -92,28 +92,37 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_model_created_at ON usage_logs (model,
 CREATE INDEX IF NOT EXISTS idx_usage_logs_upstream_status_created_at ON usage_logs (upstream_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_status_created_at ON usage_logs (status, created_at);
 
-CREATE TABLE IF NOT EXISTS runtime_events (
+CREATE TABLE IF NOT EXISTS attempt_events (
   id TEXT PRIMARY KEY,
-  level TEXT NOT NULL,
-  code TEXT NOT NULL,
-  message TEXT NOT NULL,
-  request_path TEXT,
-  method TEXT,
+  trace_id TEXT NOT NULL,
+  attempt_index INTEGER NOT NULL,
   channel_id TEXT,
-  token_id TEXT,
+  provider TEXT,
   model TEXT,
-  context_json TEXT,
+  status TEXT NOT NULL,
+  error_class TEXT,
+  error_code TEXT,
+  http_status INTEGER,
+  latency_ms INTEGER NOT NULL,
+  upstream_request_id TEXT,
+  started_at TEXT NOT NULL,
+  ended_at TEXT NOT NULL,
+  raw_size_bytes INTEGER,
+  raw_hash TEXT,
   created_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_runtime_events_created_at
-  ON runtime_events (created_at);
+CREATE INDEX IF NOT EXISTS idx_attempt_events_trace_attempt
+  ON attempt_events (trace_id, attempt_index);
 
-CREATE INDEX IF NOT EXISTS idx_runtime_events_code_created_at
-  ON runtime_events (code, created_at);
+CREATE INDEX IF NOT EXISTS idx_attempt_events_created_at
+  ON attempt_events (created_at);
 
-CREATE INDEX IF NOT EXISTS idx_runtime_events_level_created_at
-  ON runtime_events (level, created_at);
+CREATE INDEX IF NOT EXISTS idx_attempt_events_channel_created_at
+  ON attempt_events (channel_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_attempt_events_status_created_at
+  ON attempt_events (status, created_at);
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,

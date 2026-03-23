@@ -7,6 +7,7 @@
 	],
 	"scripts": {
 		"dev:worker": "bun --cwd apps/worker dev",
+		"dev:attempt-worker": "bun --cwd apps/attempt-worker dev",
 		"dev:ui": "bun --filter api-worker-ui dev -- --port 4173",
 		"dev": "node scripts/dev.mjs",
 		"deploy": "node scripts/deploy.mjs update",

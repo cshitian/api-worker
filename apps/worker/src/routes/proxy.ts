@@ -34,6 +34,7 @@ import {
 	normalizeEmbeddingRequest,
 	normalizeImageRequest,
 	type ProviderType,
+	type UpstreamRequest,
 	parseDownstreamModel,
 	parseDownstreamStream,
 } from "../services/provider-transform";
@@ -56,7 +57,6 @@ import {
 	processUsageQueueEvent,
 	type UsageQueueEvent,
 } from "../services/usage-queue";
-import { recordRuntimeEvent } from "../services/runtime-events";
 import { jsonError } from "../utils/http";
 import { safeJsonParse } from "../utils/json";
 import { extractReasoningEffort } from "../utils/reasoning";
@@ -137,6 +137,11 @@ const INTERNAL_COOLDOWN_ERROR_CODES = [
 	PROXY_UPSTREAM_TIMEOUT_ERROR_CODE,
 	PROXY_UPSTREAM_FETCH_ERROR_CODE,
 ];
+const ATTEMPT_BINDING_RESPONSE_PATH_HEADER = "x-ha-attempt-response-path";
+const ATTEMPT_BINDING_LATENCY_HEADER = "x-ha-attempt-latency-ms";
+const ATTEMPT_BINDING_UPSTREAM_REQUEST_ID_HEADER =
+	"x-ha-attempt-upstream-request-id";
+const MAX_ATTEMPT_WORKER_INVOCATIONS = 31;
 
 let activeStreamUsageParsers = 0;
 
@@ -1275,24 +1280,6 @@ function createUsageEventScheduler(
 	let overLimit = false;
 	let reserveBreakerUntil = 0;
 	let dispatchSequence = 0;
-	const emitRuntimeEvent = (
-		level: "info" | "warning" | "error",
-		code: string,
-		message: string,
-		context: Record<string, unknown>,
-	) => {
-		const task = recordRuntimeEvent(c.env.DB, {
-			level,
-			code,
-			message,
-			requestPath: diagnostics.requestPath ?? null,
-			method: diagnostics.method ?? null,
-			tokenId: diagnostics.tokenId ?? null,
-			model: diagnostics.model ?? null,
-			context,
-		}).catch(() => undefined);
-		scheduleDbWrite(c, task);
-	};
 
 	const trackQueueMetric = (kind: UsageQueueTrackKind): void => {
 		if (!limiter) {
@@ -1375,12 +1362,6 @@ function createUsageEventScheduler(
 			);
 			if (!result.allowed) {
 				overLimit = true;
-				emitRuntimeEvent(
-					"warning",
-					"usage_limiter_reserve_over_limit",
-					"usage_limiter_reserve_over_limit",
-					{ limit: dailyLimit },
-				);
 			}
 			return {
 				useQueue: result.allowed,
@@ -1388,15 +1369,7 @@ function createUsageEventScheduler(
 			};
 		} catch (error) {
 			reserveBreakerUntil = Date.now() + reserveBreakerMs;
-			emitRuntimeEvent(
-				"warning",
-				"usage_limiter_reserve_failed",
-				"usage_limiter_reserve_failed",
-				{
-					error: error instanceof Error ? error.message : String(error),
-					breaker_ms: reserveBreakerMs,
-				},
-			);
+			void error;
 			return {
 				useQueue: false,
 				reason: "reserve_failed",
@@ -1420,15 +1393,7 @@ function createUsageEventScheduler(
 				} catch (error) {
 					trackQueueMetric("queue_send_failed");
 					trackQueueMetric("fallback_direct");
-					emitRuntimeEvent(
-						"warning",
-						"usage_queue_send_failed",
-						"usage_queue_send_failed",
-						{
-							error: error instanceof Error ? error.message : String(error),
-							fallback: "direct_write",
-						},
-					);
+					void error;
 				}
 			} else {
 				if (decision.reason === "reserve_failed") {
@@ -1443,17 +1408,7 @@ function createUsageEventScheduler(
 				c.env.DB,
 				event,
 			);
-		})().catch((error) => {
-			emitRuntimeEvent(
-				"error",
-				"usage_event_schedule_failed",
-				"usage_event_schedule_failed",
-				{
-					event_type: event.type,
-					error: error instanceof Error ? error.message : String(error),
-				},
-			);
-		});
+		})().catch(() => undefined);
 		scheduleDbWrite(c, task);
 	};
 }
@@ -1767,7 +1722,25 @@ function buildUpstreamHeaders(
 	return headers;
 }
 
-async function fetchWithTimeout(
+type AttemptBindingRequest = {
+	method: string;
+	target: string;
+	fallbackTarget?: string;
+	headers: Array<[string, string]>;
+	bodyText?: string;
+	timeoutMs: number;
+	responsePath: string;
+	fallbackPath?: string;
+};
+
+type AttemptBindingResult = {
+	response: Response;
+	responsePath: string;
+	latencyMs: number;
+	upstreamRequestId: string | null;
+};
+
+async function fetchWithTimeoutLocal(
 	url: string,
 	init: RequestInit,
 	timeoutMs: number,
@@ -1787,6 +1760,99 @@ async function fetchWithTimeout(
 	}
 }
 
+function parseLatencyHeader(value: string | null): number {
+	if (!value) {
+		return 0;
+	}
+	const parsed = Number(value);
+	if (Number.isNaN(parsed) || parsed < 0) {
+		return 0;
+	}
+	return Math.floor(parsed);
+}
+
+type HeaderLookup = {
+	get: (name: string) => string | null;
+};
+
+function normalizeUpstreamRequestIdFromHeaders(headers: HeaderLookup): string | null {
+	const direct = headers.get(ATTEMPT_BINDING_UPSTREAM_REQUEST_ID_HEADER);
+	if (direct && direct.trim()) {
+		return direct.trim();
+	}
+	const candidates = [
+		"x-request-id",
+		"request-id",
+		"x-correlation-id",
+		"cf-ray",
+		"openai-request-id",
+	];
+	for (const key of candidates) {
+		const value = headers.get(key);
+		if (value && value.trim()) {
+			return value.trim();
+		}
+	}
+	return null;
+}
+
+async function executeAttemptViaWorker(
+	c: { env: AppEnv["Bindings"] },
+	input: AttemptBindingRequest,
+): Promise<AttemptBindingResult> {
+	const started = Date.now();
+	const binding = c.env.ATTEMPT_WORKER;
+	if (!binding) {
+		let response = await fetchWithTimeoutLocal(
+			input.target,
+			{
+				method: input.method,
+				headers: new Headers(input.headers),
+				body: input.bodyText || undefined,
+			},
+			input.timeoutMs,
+		);
+		let responsePath = input.responsePath;
+		if ((response.status === 400 || response.status === 404) && input.fallbackTarget) {
+			response = await fetchWithTimeoutLocal(
+				input.fallbackTarget,
+				{
+					method: input.method,
+					headers: new Headers(input.headers),
+					body: input.bodyText || undefined,
+				},
+				input.timeoutMs,
+			);
+			responsePath = input.fallbackPath ?? input.responsePath;
+		}
+		return {
+			response: response as unknown as Response,
+			responsePath,
+			latencyMs: Date.now() - started,
+			upstreamRequestId: normalizeUpstreamRequestIdFromHeaders(response.headers),
+		};
+	}
+	const response = await binding.fetch("https://attempt-worker/internal/attempt", {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+		},
+		body: JSON.stringify(input),
+	});
+	const responsePath =
+		response.headers.get(ATTEMPT_BINDING_RESPONSE_PATH_HEADER) ??
+		input.responsePath;
+	const latencyMs = parseLatencyHeader(
+		response.headers.get(ATTEMPT_BINDING_LATENCY_HEADER),
+	);
+	return {
+		response: response as unknown as Response,
+		responsePath,
+		latencyMs,
+		upstreamRequestId: normalizeUpstreamRequestIdFromHeaders(response.headers),
+	};
+}
+
 /**
  * Multi-provider proxy handler.
  */
@@ -1794,29 +1860,35 @@ proxy.all("/*", tokenAuth, async (c) => {
 	const db = c.env.DB;
 	const tokenRecord = c.get("tokenRecord") as TokenRecord;
 	const requestStart = Date.now();
-	const withTraceHeader = (response: Response): Response => response;
+	const traceId = crypto.randomUUID();
+	const withTraceHeader = (response: Response): Response => {
+		const headers = new Headers(response.headers);
+		headers.set("x-ha-trace-id", traceId);
+		return new Response(response.body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers,
+		});
+	};
 	const jsonErrorWithTrace = (
 		status: Parameters<typeof jsonError>[1],
 		message: string,
 		code?: string,
-	): Response => jsonError(c, status, message, code);
+	): Response => withTraceHeader(jsonError(c, status, message, code));
 	const [cacheConfig, runtimeSettings] = await Promise.all([
 		getCacheConfig(db, c.env.CACHE_VERSION_STORE),
 		getProxyRuntimeSettings(db),
 	]);
-	const rawRequestPath = c.req.path;
-	const normalizedRequestPath = normalizeIncomingRequestPath(rawRequestPath);
-	const requestPath = normalizedRequestPath.path;
+	const requestPath = normalizeIncomingRequestPath(c.req.path).path;
 	const requestText = await c.req.text();
 	let parsedBody = requestText
 		? safeJsonParse<Record<string, unknown> | null>(requestText, null)
 		: null;
 	const downstreamProvider = detectDownstreamProvider(requestPath);
 	const endpointType = detectEndpointType(downstreamProvider, requestPath);
-	const toolCallChainRepair =
-		downstreamProvider === "openai"
-			? repairOpenAiToolCallChain(parsedBody, endpointType)
-			: emptyToolCallChainRepairReport();
+	if (downstreamProvider === "openai") {
+		repairOpenAiToolCallChain(parsedBody, endpointType);
+	}
 	const effectiveRequestText = parsedBody
 		? JSON.stringify(parsedBody)
 		: requestText;
@@ -1838,26 +1910,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 		? hasChatToolOutputHint(parsedBody)
 		: false;
 	const reasoningEffort = extractReasoningEffort(parsedBody);
-	const scheduleRuntimeEvent = (
-		level: "info" | "warning" | "error",
-		code: string,
-		message: string,
-		context: Record<string, unknown>,
-	) => {
-		const channelId = normalizeStringField(context.channel_id ?? null);
-		const task = recordRuntimeEvent(db, {
-			level,
-			code,
-			message,
-			requestPath,
-			method: c.req.method,
-			channelId,
-			tokenId: tokenRecord.id,
-			model: downstreamModel,
-			context,
-		}).catch(() => undefined);
-		scheduleDbWrite(c, task);
-	};
 	const scheduleUsageEvent = createUsageEventScheduler(c, runtimeSettings, {
 		requestPath,
 		method: c.req.method,
@@ -1865,38 +1917,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 		model: downstreamModel,
 		requestSeed: String(requestStart),
 	});
-	if (normalizedRequestPath.rewritten) {
-		scheduleRuntimeEvent(
-			"info",
-			"proxy_request_path_normalized",
-			"proxy_request_path_normalized",
-			{
-				raw_path: rawRequestPath,
-				normalized_path: requestPath,
-			},
-		);
-	}
-	if (
-		toolCallChainRepair.patchedAssistantCalls > 0 ||
-		toolCallChainRepair.droppedToolMessages > 0 ||
-		toolCallChainRepair.droppedFunctionOutputs > 0
-	) {
-		scheduleRuntimeEvent(
-			"warning",
-			"tool_call_chain_repaired_local",
-			"tool_call_chain_repaired_local",
-			{
-				endpoint_type: endpointType,
-				patched_assistant_calls: toolCallChainRepair.patchedAssistantCalls,
-				dropped_tool_messages: toolCallChainRepair.droppedToolMessages,
-				dropped_function_outputs: toolCallChainRepair.droppedFunctionOutputs,
-				dropped_tool_message_indexes:
-					toolCallChainRepair.droppedToolMessageIndexes,
-				dropped_function_output_indexes:
-					toolCallChainRepair.droppedFunctionOutputIndexes,
-			},
-		);
-	}
 	let normalizedChat: NormalizedChatRequest | null = null;
 	let normalizedEmbedding: NormalizedEmbeddingRequest | null = null;
 	let normalizedImage: NormalizedImageRequest | null = null;
@@ -2005,16 +2025,48 @@ proxy.all("/*", tokenAuth, async (c) => {
 			},
 		});
 	};
+	const recordAttemptLog = (options: {
+		attemptIndex: number;
+		channelId: string | null;
+		provider: ProviderType | null;
+		model: string | null;
+		status: "ok" | "error";
+		errorClass?: string | null;
+		errorCode?: string | null;
+		httpStatus?: number | null;
+		latencyMs: number;
+		upstreamRequestId?: string | null;
+		startedAt: string;
+		endedAt: string;
+		rawSizeBytes?: number | null;
+		rawHash?: string | null;
+	}) => {
+		if (!runtimeSettings.attempt_log_enabled) {
+			return;
+		}
+		scheduleUsageEvent({
+			type: "attempt_log",
+			payload: {
+				traceId,
+				attemptIndex: options.attemptIndex,
+				channelId: options.channelId,
+				provider: options.provider,
+				model: options.model,
+				status: options.status,
+				errorClass: options.errorClass ?? null,
+				errorCode: options.errorCode ?? null,
+				httpStatus: options.httpStatus ?? null,
+				latencyMs: options.latencyMs,
+				upstreamRequestId: options.upstreamRequestId ?? null,
+				startedAt: options.startedAt,
+				endedAt: options.endedAt,
+				rawSizeBytes: options.rawSizeBytes ?? null,
+				rawHash: options.rawHash ?? null,
+			},
+		});
+	};
 	const toolSchemaIssue = validateToolSchemasInBody(parsedBody);
 	if (toolSchemaIssue) {
-		scheduleRuntimeEvent(
-			"warning",
-			"invalid_function_parameters_precheck",
-			"invalid_function_parameters_precheck",
-			{
-				param: toolSchemaIssue.param,
-			},
-		);
 		recordEarlyUsage({
 			status: 400,
 			code: toolSchemaIssue.code,
@@ -2033,15 +2085,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 			responsesRequestHints,
 		);
 		if (toolCallChainIssue) {
-			scheduleRuntimeEvent(
-				"warning",
-				"tool_call_chain_invalid_local_precheck",
-				"tool_call_chain_invalid_local_precheck",
-				{
-					endpoint_type: endpointType,
-					error: toolCallChainIssue.message,
-				},
-			);
 			recordEarlyUsage({
 				status: 409,
 				code: toolCallChainIssue.code,
@@ -2299,41 +2342,19 @@ proxy.all("/*", tokenAuth, async (c) => {
 				(channel) => !coolingChannels.has(channel.id),
 			);
 			if (candidates.length === 0) {
-				scheduleRuntimeEvent(
-					"warning",
-					"proxy_model_cooldown",
-					"proxy_model_cooldown",
-					{
-						path: requestPath,
-						model: downstreamModel,
-						cooldown_minutes: cooldownMinutes,
-						cooldown_threshold: cooldownFailureThreshold,
-						blocked_channels: coolingChannels.size,
-					},
-				);
+				void cooldownMinutes;
+				void cooldownFailureThreshold;
+				void coolingChannels;
 				recordEarlyUsage({
 					status: 503,
 					code: "upstream_cooldown",
 					message: "upstream_cooldown",
 				});
-					return jsonErrorWithTrace(503, "upstream_cooldown", "upstream_cooldown");
+				return jsonErrorWithTrace(503, "upstream_cooldown", "upstream_cooldown");
 			}
 		}
 	}
 
-	if (candidates.length === 0 && allowedChannels.length > 0) {
-		scheduleRuntimeEvent(
-			"warning",
-			"proxy_no_compatible_channels",
-			"proxy_no_compatible_channels",
-			{
-				path: requestPath,
-				model: downstreamModel,
-				downstream_provider: downstreamProvider,
-				allowed_channels: allowedChannels.length,
-			},
-		);
-	}
 	if (candidates.length === 0) {
 		recordEarlyUsage({
 			status: 503,
@@ -2351,7 +2372,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 		0,
 		Math.floor(Number(runtimeSettings.retry_max_retries ?? 3)),
 	);
-	const ordered = createWeightedOrder(candidates).slice(0, maxRetries + 1);
+	const maxAttempts = Math.min(maxRetries + 1, MAX_ATTEMPT_WORKER_INVOCATIONS);
+	const ordered = createWeightedOrder(candidates).slice(0, maxAttempts);
 	const upstreamTimeoutMs = Math.max(
 		0,
 		Math.floor(Number(runtimeSettings.upstream_timeout_ms ?? 30000)),
@@ -2419,9 +2441,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 			),
 		);
 	};
-	for (const channel of ordered) {
+	for (const [attemptIndex, channel] of ordered.entries()) {
+		const attemptNumber = attemptIndex + 1;
 		lastChannel = channel;
 		const attemptStart = Date.now();
+		const attemptStartedAt = new Date(attemptStart).toISOString();
 		const metadata = parseChannelMetadata(channel.metadata_json);
 		const upstreamProvider = resolveProvider(metadata.site_type);
 		const resolvedModel = resolveUpstreamModelForChannel(
@@ -2439,6 +2463,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		) {
 			continue;
 		}
+
 		const baseUrl = resolveChannelBaseUrl(channel);
 		const tokens = callTokenMap.get(channel.id) ?? [];
 		const selection = selectTokenForModel(tokens, recordModel);
@@ -2454,11 +2479,13 @@ proxy.all("/*", tokenAuth, async (c) => {
 		);
 		headers.delete("host");
 		headers.delete("content-length");
+
 		let upstreamRequestPath = targetPath;
 		let upstreamFallbackPath: string | undefined;
 		let upstreamBodyText = effectiveRequestText || undefined;
 		let absoluteUrl: string | undefined;
 		const sameProvider = upstreamProvider === downstreamProvider;
+
 		if (endpointType === "passthrough") {
 			if (!sameProvider) {
 				continue;
@@ -2486,71 +2513,14 @@ proxy.all("/*", tokenAuth, async (c) => {
 					model: upstreamModel,
 				});
 			}
-			if (endpointType === "chat" || endpointType === "responses") {
-				if (metadata.endpoint_overrides.chat_url && normalizedChat) {
-					const request = buildUpstreamChatRequest(
-						upstreamProvider,
-						normalizedChat,
-						upstreamModel,
-						endpointType,
-						isStream,
-						metadata.endpoint_overrides,
-					);
-					if (request) {
-						upstreamRequestPath = request.path;
-						absoluteUrl = request.absoluteUrl;
-						upstreamFallbackPath = request.absoluteUrl
-							? undefined
-							: request.fallbackPath;
-					}
-				} else if (
-					endpointType === "responses" &&
-					upstreamProvider === "openai"
-				) {
-					upstreamFallbackPath = "/responses";
-				}
-			}
-			if (
-				endpointType === "embeddings" &&
-				metadata.endpoint_overrides.embedding_url
-			) {
-				if (normalizedEmbedding) {
-					const request = buildUpstreamEmbeddingRequest(
-						upstreamProvider,
-						normalizedEmbedding,
-						upstreamModel,
-						metadata.endpoint_overrides,
-					);
-					if (request) {
-						upstreamRequestPath = request.path;
-						absoluteUrl = request.absoluteUrl;
-					}
-				}
-			}
-			if (endpointType === "images" && metadata.endpoint_overrides.image_url) {
-				if (normalizedImage) {
-					const request = buildUpstreamImageRequest(
-						upstreamProvider,
-						normalizedImage,
-						upstreamModel,
-						metadata.endpoint_overrides,
-					);
-					if (request) {
-						upstreamRequestPath = request.path;
-						absoluteUrl = request.absoluteUrl;
-					}
-				}
-			}
 		} else {
-			let built: {
-				request: {
-					path: string;
-					fallbackPath?: string;
-					absoluteUrl?: string;
-					body: Record<string, unknown> | null;
-				};
-				bodyText?: string;
-			} | null = null;
+			let built:
+				| {
+						request: UpstreamRequest;
+						bodyText?: string;
+				  }
+				| null = null;
+
 			if (endpointType === "chat" || endpointType === "responses") {
 				if (!normalizedChat) {
 					recordEarlyUsage({
@@ -2620,173 +2590,186 @@ proxy.all("/*", tokenAuth, async (c) => {
 					bodyText: request.body ? JSON.stringify(request.body) : undefined,
 				};
 			}
+
 			if (!built) {
 				continue;
 			}
 			upstreamRequestPath = built.request.path;
 			absoluteUrl = built.request.absoluteUrl;
-				upstreamFallbackPath = built.request.absoluteUrl
-					? undefined
-					: built.request.fallbackPath;
-				upstreamBodyText = built.bodyText;
-			}
-			const shouldHandleStreamOptions =
-				upstreamProvider === "openai" &&
-				isStream &&
-				(endpointType === "chat" || endpointType === "responses");
-			let streamOptionsInjected = false;
-			let strippedStreamOptionsBodyText: string | undefined = upstreamBodyText;
-			if (shouldHandleStreamOptions) {
-				const capability = await loadStreamOptionsCapability(channel.id);
-				if (capability !== "unsupported") {
-					const injected = transformOpenAiStreamOptions(
-						upstreamBodyText,
-						"inject",
-					);
-					upstreamBodyText = injected.bodyText;
-					streamOptionsInjected = injected.injected;
-					const stripped = transformOpenAiStreamOptions(
-						upstreamBodyText,
-						"strip",
-					);
-					strippedStreamOptionsBodyText = stripped.bodyText;
-				} else {
-					const stripped = transformOpenAiStreamOptions(
-						upstreamBodyText,
-						"strip",
-					);
-					upstreamBodyText = stripped.bodyText;
-					strippedStreamOptionsBodyText = stripped.bodyText;
-				}
-			}
-			const targetBase = absoluteUrl ?? `${baseUrl}${upstreamRequestPath}`;
-			const target = mergeQuery(
-			targetBase,
-			querySuffix,
-			metadata.query_overrides,
-		);
+			upstreamFallbackPath = built.request.absoluteUrl
+				? undefined
+				: built.request.fallbackPath;
+			upstreamBodyText = built.bodyText;
+		}
 
-			try {
-				const executeUpstreamFetch = async (
-					bodyText: string | undefined,
-				): Promise<{ response: Response; responsePath: string }> => {
-					let response = await fetchWithTimeout(
-						target,
-						{
-							method: c.req.method,
-							headers,
-							body: bodyText || undefined,
-						},
-						upstreamTimeoutMs,
-					);
-					let responsePath = upstreamRequestPath;
-					if (
-						(response.status === 400 || response.status === 404) &&
-						upstreamFallbackPath
-					) {
-						const fallbackTargetBase = absoluteUrl
-							? absoluteUrl
-							: `${baseUrl}${upstreamFallbackPath}`;
-						const fallbackTarget = mergeQuery(
-							fallbackTargetBase,
+		const shouldHandleStreamOptions =
+			upstreamProvider === "openai" &&
+			isStream &&
+			(endpointType === "chat" || endpointType === "responses");
+		let streamOptionsInjected = false;
+		let strippedStreamOptionsBodyText: string | undefined = upstreamBodyText;
+		if (shouldHandleStreamOptions) {
+			const capability = await loadStreamOptionsCapability(channel.id);
+			if (capability !== "unsupported") {
+				const injected = transformOpenAiStreamOptions(
+					upstreamBodyText,
+					"inject",
+				);
+				upstreamBodyText = injected.bodyText;
+				streamOptionsInjected = injected.injected;
+				const stripped = transformOpenAiStreamOptions(upstreamBodyText, "strip");
+				strippedStreamOptionsBodyText = stripped.bodyText;
+			} else {
+				const stripped = transformOpenAiStreamOptions(upstreamBodyText, "strip");
+				upstreamBodyText = stripped.bodyText;
+				strippedStreamOptionsBodyText = stripped.bodyText;
+			}
+		}
+
+		const targetBase = absoluteUrl ?? `${baseUrl}${upstreamRequestPath}`;
+		const target = mergeQuery(targetBase, querySuffix, metadata.query_overrides);
+
+		try {
+			const fallbackTarget =
+				upstreamFallbackPath && !absoluteUrl
+					? mergeQuery(
+							`${baseUrl}${upstreamFallbackPath}`,
 							querySuffix,
 							metadata.query_overrides,
-						);
-						response = await fetchWithTimeout(
-							fallbackTarget,
-							{
-								method: c.req.method,
-								headers,
-								body: bodyText || undefined,
-							},
-							upstreamTimeoutMs,
-						);
-						responsePath = upstreamFallbackPath;
-					}
-					return { response, responsePath };
-				};
-				let { response, responsePath } =
-					await executeUpstreamFetch(upstreamBodyText);
-				if (shouldHandleStreamOptions && streamOptionsInjected && !response.ok) {
-					const details = await extractErrorDetails(response);
-					if (isStreamOptionsUnsupportedMessage(details.errorMessage)) {
-						saveStreamOptionsCapability(channel.id, false);
-						const retried = await executeUpstreamFetch(
-							strippedStreamOptionsBodyText,
-						);
-						response = retried.response;
-						responsePath = retried.responsePath;
-					}
-				}
-				if (shouldHandleStreamOptions && response.ok && streamOptionsInjected) {
-					saveStreamOptionsCapability(channel.id, true);
-				}
+						)
+					: undefined;
 
-				const attemptLatencyMs = Date.now() - attemptStart;
-				lastResponse = response;
-				lastRequestPath = responsePath;
-				if (response.ok) {
-					const hasUsageHeaderSignal = hasUsageHeaders(response.headers);
-					const headerUsage = parseUsageFromHeaders(response.headers);
-					let jsonUsage: NormalizedUsage | null = null;
-					let hasUsageJsonSignal = false;
-					if (
-						!isStream &&
-						response.headers.get("content-type")?.includes("application/json")
-					) {
-						const data = await response
-							.clone()
-							.json()
-							.catch(() => null);
-						hasUsageJsonSignal = hasUsageJsonHint(data);
-						jsonUsage = parseUsageFromJson(data);
-					}
-					const immediateUsage = jsonUsage ?? headerUsage;
-					const immediateUsageSource = jsonUsage
-						? "json"
-						: headerUsage
-							? "header"
-							: "none";
-					if (!isStream && !immediateUsage) {
-						const usageMissingCode =
-							hasUsageHeaderSignal || hasUsageJsonSignal
-								? "usage_missing.non_stream.signal_present_unparseable"
-								: "usage_missing.non_stream.signal_absent";
-						const usageMissingMessage = `usage_missing: ${usageMissingCode}`;
-						lastErrorDetails = {
-							upstreamStatus: response.status,
-							errorCode: usageMissingCode,
-							errorMessage: usageMissingMessage,
-						};
-						recordAttemptUsage({
-							channelId: channel.id,
-							requestPath: responsePath,
-						latencyMs: attemptLatencyMs,
-						firstTokenLatencyMs: attemptLatencyMs,
-							usage: null,
-							status: "error",
-							upstreamStatus: response.status,
-							errorCode: usageMissingCode,
-							errorMessage: usageMissingMessage,
-							failureStage: "usage_finalize",
-							failureReason: usageMissingCode,
-							usageSource: immediateUsageSource,
-						});
-						continue;
-					}
-					if (!isStream) {
+			let {
+				response,
+				responsePath,
+				latencyMs: attemptLatencyMs,
+				upstreamRequestId: attemptUpstreamRequestId,
+			} = await executeAttemptViaWorker(c, {
+				method: c.req.method,
+				target,
+				fallbackTarget,
+				headers: Array.from(headers.entries()),
+				bodyText: upstreamBodyText,
+				timeoutMs: upstreamTimeoutMs,
+				responsePath: upstreamRequestPath,
+				fallbackPath: upstreamFallbackPath,
+			});
+
+			if (shouldHandleStreamOptions && streamOptionsInjected && !response.ok) {
+				const details = await extractErrorDetails(response);
+				if (isStreamOptionsUnsupportedMessage(details.errorMessage)) {
+					saveStreamOptionsCapability(channel.id, false);
+					const retried = await executeAttemptViaWorker(c, {
+						method: c.req.method,
+						target,
+						fallbackTarget,
+						headers: Array.from(headers.entries()),
+						bodyText: strippedStreamOptionsBodyText,
+						timeoutMs: upstreamTimeoutMs,
+						responsePath: upstreamRequestPath,
+						fallbackPath: upstreamFallbackPath,
+					});
+					response = retried.response;
+					responsePath = retried.responsePath;
+					attemptLatencyMs = retried.latencyMs;
+					attemptUpstreamRequestId = retried.upstreamRequestId;
+				}
+			}
+			if (shouldHandleStreamOptions && response.ok && streamOptionsInjected) {
+				saveStreamOptionsCapability(channel.id, true);
+			}
+
+			lastResponse = response;
+			lastRequestPath = responsePath;
+
+			if (response.ok) {
+				const hasUsageHeaderSignal = hasUsageHeaders(response.headers);
+				const headerUsage = parseUsageFromHeaders(response.headers);
+				let jsonUsage: NormalizedUsage | null = null;
+				let hasUsageJsonSignal = false;
+				if (
+					!isStream &&
+					response.headers.get("content-type")?.includes("application/json")
+				) {
+					const data = await response.clone().json().catch(() => null);
+					hasUsageJsonSignal = hasUsageJsonHint(data);
+					jsonUsage = parseUsageFromJson(data);
+				}
+				const immediateUsage = jsonUsage ?? headerUsage;
+				const immediateUsageSource = jsonUsage
+					? "json"
+					: headerUsage
+						? "header"
+						: "none";
+
+				if (!isStream && !immediateUsage) {
+					const usageMissingCode =
+						hasUsageHeaderSignal || hasUsageJsonSignal
+							? "usage_missing.non_stream.signal_present_unparseable"
+							: "usage_missing.non_stream.signal_absent";
+					const usageMissingMessage = `usage_missing: ${usageMissingCode}`;
+					lastErrorDetails = {
+						upstreamStatus: response.status,
+						errorCode: usageMissingCode,
+						errorMessage: usageMissingMessage,
+					};
 					recordAttemptUsage({
 						channelId: channel.id,
 						requestPath: responsePath,
 						latencyMs: attemptLatencyMs,
 						firstTokenLatencyMs: attemptLatencyMs,
-							usage: immediateUsage,
-							status: "ok",
-							upstreamStatus: response.status,
-							failureStage: "usage_finalize",
-							usageSource: immediateUsageSource,
-						});
-					}
+						usage: null,
+						status: "error",
+						upstreamStatus: response.status,
+						errorCode: usageMissingCode,
+						errorMessage: usageMissingMessage,
+						failureStage: "usage_finalize",
+						failureReason: usageMissingCode,
+						usageSource: immediateUsageSource,
+					});
+					recordAttemptLog({
+						attemptIndex: attemptNumber,
+						channelId: channel.id,
+						provider: upstreamProvider,
+						model: upstreamModel ?? downstreamModel,
+						status: "error",
+						errorClass: "usage_finalize",
+						errorCode: usageMissingCode,
+						httpStatus: response.status,
+						latencyMs: attemptLatencyMs,
+						upstreamRequestId: attemptUpstreamRequestId,
+						startedAt: attemptStartedAt,
+						endedAt: new Date().toISOString(),
+					});
+					continue;
+				}
+
+				if (!isStream) {
+					recordAttemptUsage({
+						channelId: channel.id,
+						requestPath: responsePath,
+						latencyMs: attemptLatencyMs,
+						firstTokenLatencyMs: attemptLatencyMs,
+						usage: immediateUsage,
+						status: "ok",
+						upstreamStatus: response.status,
+						failureStage: "usage_finalize",
+						usageSource: immediateUsageSource,
+					});
+				}
+				recordAttemptLog({
+					attemptIndex: attemptNumber,
+					channelId: channel.id,
+					provider: upstreamProvider,
+					model: upstreamModel ?? downstreamModel,
+					status: "ok",
+					httpStatus: response.status,
+					latencyMs: attemptLatencyMs,
+					upstreamRequestId: attemptUpstreamRequestId,
+					startedAt: attemptStartedAt,
+					endedAt: new Date().toISOString(),
+				});
+
 				selectedChannel = channel;
 				selectedUpstreamProvider = upstreamProvider;
 				try {
@@ -2798,11 +2781,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 					selectedUpstreamEndpoint = endpointType;
 				}
 				selectedUpstreamModel = upstreamModel;
-					selectedResponse = response;
-					selectedRequestPath = responsePath;
-					selectedImmediateUsage = immediateUsage;
-					selectedHasUsageHeaders = hasUsageHeaderSignal;
-					lastErrorDetails = null;
+				selectedResponse = response;
+				selectedRequestPath = responsePath;
+				selectedImmediateUsage = immediateUsage;
+				selectedHasUsageHeaders = hasUsageHeaderSignal;
+				lastErrorDetails = null;
 				if (recordModel) {
 					scheduleUsageEvent({
 						type: "capability_upsert",
@@ -2815,6 +2798,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 				}
 				break;
 			}
+
 			const errorInfo = await extractErrorDetails(response);
 			const normalizedErrorCode = normalizeUpstreamErrorCode(
 				errorInfo.errorCode,
@@ -2822,47 +2806,63 @@ proxy.all("/*", tokenAuth, async (c) => {
 			);
 			const normalizedErrorMessage =
 				normalizeMessage(errorInfo.errorMessage) ?? normalizedErrorCode;
-				const responsesToolCallMismatch =
-					downstreamProvider === "openai" &&
-					(responsesRequestHints?.hasFunctionCallOutput === true ||
-						hasChatToolOutput) &&
-					isResponsesToolCallNotFoundMessage(normalizedErrorMessage);
-				const streamOptionsUnsupported =
-					shouldHandleStreamOptions &&
-					isStreamOptionsUnsupportedMessage(normalizedErrorMessage);
-				if (responsesToolCallMismatch) {
-					responsesToolCallMismatchChannels.push(channel.id);
-				}
-				const finalErrorCode = responsesToolCallMismatch
-					? "responses_tool_call_chain_mismatch"
-					: streamOptionsUnsupported
-						? "stream_options_unsupported"
+			const responsesToolCallMismatch =
+				downstreamProvider === "openai" &&
+				(responsesRequestHints?.hasFunctionCallOutput === true ||
+					hasChatToolOutput) &&
+				isResponsesToolCallNotFoundMessage(normalizedErrorMessage);
+			const streamOptionsUnsupported =
+				shouldHandleStreamOptions &&
+				isStreamOptionsUnsupportedMessage(normalizedErrorMessage);
+			if (responsesToolCallMismatch) {
+				responsesToolCallMismatchChannels.push(channel.id);
+			}
+			const finalErrorCode = responsesToolCallMismatch
+				? "responses_tool_call_chain_mismatch"
+				: streamOptionsUnsupported
+					? "stream_options_unsupported"
 					: normalizedErrorCode;
-				lastErrorDetails = {
-					upstreamStatus: response.status,
-					errorCode: finalErrorCode,
-					errorMessage: normalizedErrorMessage,
-					errorMetaJson: errorInfo.errorMetaJson,
-				};
-				recordAttemptUsage({
-					channelId: channel.id,
-					requestPath: responsePath,
-					latencyMs: attemptLatencyMs,
-					firstTokenLatencyMs: isStream ? null : attemptLatencyMs,
-					usage: null,
-					status: "error",
-					upstreamStatus: response.status,
-					errorCode: finalErrorCode,
-					errorMessage: normalizedErrorMessage,
-					failureStage: "upstream_response",
-					failureReason: finalErrorCode,
-					usageSource: "none",
-					errorMetaJson: errorInfo.errorMetaJson,
-				});
-			const cooldownEligible = shouldCooldown(
-				response.status,
-				finalErrorCode,
-			);
+			lastErrorDetails = {
+				upstreamStatus: response.status,
+				errorCode: finalErrorCode,
+				errorMessage: normalizedErrorMessage,
+				errorMetaJson: errorInfo.errorMetaJson,
+			};
+			recordAttemptUsage({
+				channelId: channel.id,
+				requestPath: responsePath,
+				latencyMs: attemptLatencyMs,
+				firstTokenLatencyMs: isStream ? null : attemptLatencyMs,
+				usage: null,
+				status: "error",
+				upstreamStatus: response.status,
+				errorCode: finalErrorCode,
+				errorMessage: normalizedErrorMessage,
+				failureStage: "upstream_response",
+				failureReason: finalErrorCode,
+				usageSource: "none",
+				errorMetaJson: errorInfo.errorMetaJson,
+			});
+			recordAttemptLog({
+				attemptIndex: attemptNumber,
+				channelId: channel.id,
+				provider: upstreamProvider,
+				model: upstreamModel ?? downstreamModel,
+				status: "error",
+				errorClass: responsesToolCallMismatch
+					? "responses_tool_call_chain"
+					: streamOptionsUnsupported
+						? "stream_options"
+						: "upstream_response",
+				errorCode: finalErrorCode,
+				httpStatus: response.status,
+				latencyMs: attemptLatencyMs,
+				upstreamRequestId: attemptUpstreamRequestId,
+				startedAt: attemptStartedAt,
+				endedAt: new Date().toISOString(),
+			});
+
+			const cooldownEligible = shouldCooldown(response.status, finalErrorCode);
 			if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
 				scheduleUsageEvent({
 					type: "model_error",
@@ -2906,46 +2906,45 @@ proxy.all("/*", tokenAuth, async (c) => {
 				usageErrorDetail,
 				usageErrorMessageMaxLength,
 			);
-			scheduleRuntimeEvent(
-				"error",
-				"proxy_upstream_exception",
-				"proxy_upstream_exception",
-				{
-					channel_id: channel.id,
-					upstream_provider: upstreamProvider,
-					path: upstreamRequestPath,
-					model: downstreamModel,
-					upstream_model: upstreamModel,
-					timeout_ms: upstreamTimeoutMs,
-					reason: isTimeout ? "timeout" : "exception",
-					error: error instanceof Error ? error.message : String(error),
-				},
-			);
 			const attemptLatencyMs = Date.now() - attemptStart;
-				lastErrorDetails = {
-					upstreamStatus: null,
-					errorCode: usageErrorCode,
-					errorMessage: usageErrorMessage,
-					errorMetaJson: JSON.stringify({
-						type: "fetch_exception",
-						reason: isTimeout ? "timeout" : "exception",
-					}),
-				};
-				recordAttemptUsage({
-					channelId: channel.id,
-					requestPath: upstreamRequestPath,
-					latencyMs: attemptLatencyMs,
-					firstTokenLatencyMs: null,
-					usage: null,
-					status: "error",
-					upstreamStatus: null,
-					errorCode: lastErrorDetails.errorCode,
-					errorMessage: lastErrorDetails.errorMessage,
-					failureStage: "upstream_call",
-					failureReason: usageErrorCode,
-					usageSource: "none",
-					errorMetaJson: lastErrorDetails.errorMetaJson ?? null,
-				});
+			lastErrorDetails = {
+				upstreamStatus: null,
+				errorCode: usageErrorCode,
+				errorMessage: usageErrorMessage,
+				errorMetaJson: JSON.stringify({
+					type: "fetch_exception",
+					reason: isTimeout ? "timeout" : "exception",
+				}),
+			};
+			recordAttemptUsage({
+				channelId: channel.id,
+				requestPath: upstreamRequestPath,
+				latencyMs: attemptLatencyMs,
+				firstTokenLatencyMs: null,
+				usage: null,
+				status: "error",
+				upstreamStatus: null,
+				errorCode: lastErrorDetails.errorCode,
+				errorMessage: lastErrorDetails.errorMessage,
+				failureStage: "upstream_call",
+				failureReason: usageErrorCode,
+				usageSource: "none",
+				errorMetaJson: lastErrorDetails.errorMetaJson ?? null,
+			});
+			recordAttemptLog({
+				attemptIndex: attemptNumber,
+				channelId: channel.id,
+				provider: upstreamProvider,
+				model: upstreamModel ?? downstreamModel,
+				status: "error",
+				errorClass: isTimeout ? "timeout" : "exception",
+				errorCode: usageErrorCode,
+				httpStatus: null,
+				latencyMs: attemptLatencyMs,
+				startedAt: attemptStartedAt,
+				endedAt: new Date().toISOString(),
+			});
+
 			const cooldownEligible = shouldCooldown(null, usageErrorCode);
 			if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
 				scheduleUsageEvent({
@@ -2978,21 +2977,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 		}
 	}
 
-	if (!selectedResponse && lastResponse && !lastResponse.ok) {
-		scheduleRuntimeEvent(
-			"warning",
-			"proxy_upstream_exhausted",
-			"proxy_upstream_exhausted",
-			{
-				path: targetPath,
-				model: downstreamModel,
-				status: lastResponse.status,
-				last_channel_id: lastChannel?.id ?? null,
-				last_request_path: lastRequestPath,
-			},
-		);
-	}
-
 	if (!selectedResponse) {
 		if (responsesToolCallMismatchChannels.length > 0) {
 			const code = "responses_tool_call_chain_mismatch";
@@ -3011,12 +2995,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 			const errorCode = lastErrorDetails.errorCode ?? "upstream_unavailable";
 			return jsonErrorWithTrace(502, errorCode, errorCode);
 		}
-		scheduleRuntimeEvent("error", "proxy_unavailable", "proxy_unavailable", {
-			path: targetPath,
-			model: downstreamModel,
-			latency_ms: Date.now() - requestStart,
-			last_channel_id: lastChannel?.id ?? null,
-		});
 		recordEarlyUsage({
 			status: 502,
 			code: "upstream_unavailable",
@@ -3044,26 +3022,26 @@ proxy.all("/*", tokenAuth, async (c) => {
 		const canParseStream =
 			streamUsageOptions.mode !== "off" &&
 			activeStreamUsageParsers < streamUsageMaxParsers;
-			if (!canParseStream) {
-				const fallbackUsageSource = selectedImmediateUsage ? "header" : "none";
-				const fallbackMissingCode = "usage_missing.stream.parser_disabled";
-				finalizeUsage({
-					channelId: selectedChannel.id,
-					requestPath: selectedRequestPath,
-					latencyMs: selectedLatencyMs,
-					firstTokenLatencyMs: null,
-					usage: selectedImmediateUsage,
-					status: selectedImmediateUsage ? "ok" : "error",
-					upstreamStatus: selectedResponse.status,
-					errorCode: selectedImmediateUsage ? null : fallbackMissingCode,
-					errorMessage: selectedImmediateUsage
-						? null
-						: `usage_missing: ${fallbackMissingCode}`,
-					failureStage: "usage_finalize",
-					failureReason: selectedImmediateUsage ? null : fallbackMissingCode,
-					usageSource: fallbackUsageSource,
-				});
-			} else {
+		if (!canParseStream) {
+			const fallbackUsageSource = selectedImmediateUsage ? "header" : "none";
+			const fallbackMissingCode = "usage_missing.stream.parser_disabled";
+			finalizeUsage({
+				channelId: selectedChannel.id,
+				requestPath: selectedRequestPath,
+				latencyMs: selectedLatencyMs,
+				firstTokenLatencyMs: null,
+				usage: selectedImmediateUsage,
+				status: selectedImmediateUsage ? "ok" : "error",
+				upstreamStatus: selectedResponse.status,
+				errorCode: selectedImmediateUsage ? null : fallbackMissingCode,
+				errorMessage: selectedImmediateUsage
+					? null
+					: `usage_missing: ${fallbackMissingCode}`,
+				failureStage: "usage_finalize",
+				failureReason: selectedImmediateUsage ? null : fallbackMissingCode,
+				usageSource: fallbackUsageSource,
+			});
+		} else {
 			activeStreamUsageParsers += 1;
 			const task = parseUsageFromSse(selectedResponse.clone(), {
 				...streamUsageOptions,
@@ -3072,83 +3050,64 @@ proxy.all("/*", tokenAuth, async (c) => {
 				.then((streamUsage) => {
 					const usageValue = selectedImmediateUsage ?? streamUsage.usage;
 					if (streamUsage.timedOut) {
-						scheduleRuntimeEvent(
-							"warning",
-							"usage_stream_parse_timeout",
-							"usage_stream_parse_timeout",
-							{
-								path: selectedRequestPath,
-								timeout_ms: streamUsageParseTimeoutMs,
-							},
-						);
 						const timeoutMessage = `usage_parse_timeout: stream usage parsing timed out after ${streamUsageParseTimeoutMs}ms`;
-							finalizeUsage({
-								channelId: selectedChannel.id,
-								requestPath: selectedRequestPath,
-								latencyMs: selectedLatencyMs,
-								firstTokenLatencyMs: streamUsage.firstTokenLatencyMs,
-								usage: usageValue,
-								status: usageValue ? "ok" : "error",
-								upstreamStatus: selectedResponse.status,
-								errorCode: usageValue ? null : "usage_parse_timeout",
-								errorMessage: usageValue ? null : timeoutMessage,
-								failureStage: "usage_finalize",
-								failureReason: usageValue ? null : "usage_parse_timeout",
-								usageSource: usageValue
-									? selectedImmediateUsage
-										? "header"
-										: "sse"
-									: "none",
-							});
-						return;
-						}
-						if (!usageValue) {
-							const streamUsageMissingCode = selectedHasUsageHeaders
-								? "usage_missing.stream.header_signal_unparseable"
-								: "usage_missing.stream.signal_absent";
-							const streamUsageMissingMessage = `usage_missing: ${streamUsageMissingCode}`;
-							finalizeUsage({
-								channelId: selectedChannel.id,
-								requestPath: selectedRequestPath,
-								latencyMs: selectedLatencyMs,
-								firstTokenLatencyMs: streamUsage.firstTokenLatencyMs,
-								usage: null,
-								status: "error",
-								upstreamStatus: selectedResponse.status,
-								errorCode: streamUsageMissingCode,
-								errorMessage: streamUsageMissingMessage,
-								failureStage: "usage_finalize",
-								failureReason: streamUsageMissingCode,
-								usageSource: "none",
-							});
-							return;
-						}
 						finalizeUsage({
 							channelId: selectedChannel.id,
 							requestPath: selectedRequestPath,
 							latencyMs: selectedLatencyMs,
 							firstTokenLatencyMs: streamUsage.firstTokenLatencyMs,
 							usage: usageValue,
-							status: "ok",
+							status: usageValue ? "ok" : "error",
 							upstreamStatus: selectedResponse.status,
+							errorCode: usageValue ? null : "usage_parse_timeout",
+							errorMessage: usageValue ? null : timeoutMessage,
 							failureStage: "usage_finalize",
-							usageSource: selectedImmediateUsage ? "header" : "sse",
+							failureReason: usageValue ? null : "usage_parse_timeout",
+							usageSource: usageValue
+								? selectedImmediateUsage
+									? "header"
+									: "sse"
+								: "none",
 						});
+						return;
+					}
+					if (!usageValue) {
+						const streamUsageMissingCode = selectedHasUsageHeaders
+							? "usage_missing.stream.header_signal_unparseable"
+							: "usage_missing.stream.signal_absent";
+						const streamUsageMissingMessage = `usage_missing: ${streamUsageMissingCode}`;
+						finalizeUsage({
+							channelId: selectedChannel.id,
+							requestPath: selectedRequestPath,
+							latencyMs: selectedLatencyMs,
+							firstTokenLatencyMs: streamUsage.firstTokenLatencyMs,
+							usage: null,
+							status: "error",
+							upstreamStatus: selectedResponse.status,
+							errorCode: streamUsageMissingCode,
+							errorMessage: streamUsageMissingMessage,
+							failureStage: "usage_finalize",
+							failureReason: streamUsageMissingCode,
+							usageSource: "none",
+						});
+						return;
+					}
+					finalizeUsage({
+						channelId: selectedChannel.id,
+						requestPath: selectedRequestPath,
+						latencyMs: selectedLatencyMs,
+						firstTokenLatencyMs: streamUsage.firstTokenLatencyMs,
+						usage: usageValue,
+						status: "ok",
+						upstreamStatus: selectedResponse.status,
+						failureStage: "usage_finalize",
+						usageSource: selectedImmediateUsage ? "header" : "sse",
+					});
 				})
 				.catch((error) => {
 					const parseFailure = classifyStreamUsageParseError(
 						error,
 						usageErrorMessageMaxLength,
-					);
-					scheduleRuntimeEvent(
-						"warning",
-						"usage_stream_parse_failed",
-						"usage_stream_parse_failed",
-						{
-							path: selectedRequestPath,
-							error_code: parseFailure.errorCode,
-							error_message: parseFailure.errorMessage,
-						},
 					);
 					finalizeUsage({
 						channelId: selectedChannel.id,

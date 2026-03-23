@@ -6,6 +6,7 @@ on:
     paths:
       - "apps/ui/**"
       - "apps/worker/**"
+      - "apps/attempt-worker/**"
   workflow_dispatch:
     inputs:
       from_panel:
@@ -102,7 +103,7 @@ jobs:
             if echo "$CHANGED" | grep -q "^apps/ui/"; then
               echo "ui_changed=true" >> $GITHUB_OUTPUT
             fi
-            if echo "$CHANGED" | grep -q "^apps/worker/"; then
+            if echo "$CHANGED" | grep -Eq "^apps/(worker|attempt-worker)/"; then
               echo "worker_changed=true" >> $GITHUB_OUTPUT
             fi
             if echo "$CHANGED" | grep -q "^apps/worker/migrations/"; then
@@ -391,6 +392,13 @@ jobs:
         run: bunx wrangler d1 migrations apply DB --remote --config apps/worker/wrangler.toml
 
       - name: Deploy to Cloudflare Workers (SPA Mode)
+        if: steps.check-db.outputs.db_exists != 'true' && needs.check-config.outputs.deploy_worker == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bunx wrangler deploy --config apps/attempt-worker/wrangler.toml
+
+      - name: Deploy to Cloudflare Workers (API Worker)
         if: steps.check-db.outputs.db_exists != 'true' && (needs.check-config.outputs.deploy_worker == 'true' || needs.check-config.outputs.deploy_ui == 'true')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -593,7 +601,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: bunx wrangler d1 migrations apply DB --remote --config apps/worker/wrangler.toml
 
-      - name: Deploy to Cloudflare Workers (SPA Mode)
+      - name: Deploy to Cloudflare Workers (Attempt Worker)
+        if: needs.check-config.outputs.deploy_worker == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bunx wrangler deploy --config apps/attempt-worker/wrangler.toml
+
+      - name: Deploy to Cloudflare Workers (API Worker)
         if: needs.check-config.outputs.deploy_worker == 'true' || needs.check-config.outputs.deploy_ui == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

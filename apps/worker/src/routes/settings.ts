@@ -154,6 +154,8 @@ settings.put("/", async (c) => {
 		usage_queue_enabled?: boolean;
 		usage_queue_daily_limit?: number;
 		usage_queue_direct_write_ratio?: number;
+		attempt_log_enabled?: boolean;
+		attempt_log_retention_days?: number;
 	} = {};
 
 	if (body.log_retention_days !== undefined) {
@@ -388,6 +390,47 @@ settings.put("/", async (c) => {
 			);
 		}
 		runtimePatch.usage_queue_direct_write_ratio = ratio;
+		runtimeTouched = true;
+	}
+
+	if (body.attempt_log_enabled !== undefined) {
+		const raw = body.attempt_log_enabled;
+		let enabled: boolean | null = null;
+		if (typeof raw === "boolean") {
+			enabled = raw;
+		} else if (typeof raw === "number") {
+			enabled = raw !== 0;
+		} else if (typeof raw === "string") {
+			const normalized = raw.trim().toLowerCase();
+			if (["1", "true", "yes", "on"].includes(normalized)) {
+				enabled = true;
+			} else if (["0", "false", "no", "off"].includes(normalized)) {
+				enabled = false;
+			}
+		}
+		if (enabled === null) {
+			return jsonError(
+				c,
+				400,
+				"invalid_attempt_log_enabled",
+				"invalid_attempt_log_enabled",
+			);
+		}
+		runtimePatch.attempt_log_enabled = enabled;
+		runtimeTouched = true;
+	}
+
+	if (body.attempt_log_retention_days !== undefined) {
+		const days = Number(body.attempt_log_retention_days);
+		if (Number.isNaN(days) || days < 1 || !Number.isInteger(days)) {
+			return jsonError(
+				c,
+				400,
+				"invalid_attempt_log_retention_days",
+				"invalid_attempt_log_retention_days",
+			);
+		}
+		runtimePatch.attempt_log_retention_days = days;
 		runtimeTouched = true;
 	}
 

@@ -25,6 +25,7 @@ const BUN_CMD = (() => {
 })();
 
 const commands = [
+	{ name: "attempt-worker", cmd: BUN_CMD, args: ["run", "dev:attempt-worker"] },
 	{ name: "worker", cmd: BUN_CMD, args: ["run", "dev:worker"] },
 	{ name: "ui", cmd: BUN_CMD, args: ["run", "dev:ui"] },
 ];

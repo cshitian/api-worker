@@ -8,9 +8,6 @@ enabled = true
 [observability.logs]
 enabled = true
 
-[observability.traces]
-enabled = true
-
 [placement]
 mode = "smart"
 
@@ -41,6 +38,10 @@ class_name = "UsageLimiter"
 [[durable_objects.bindings]]
 name = "CACHE_VERSION_STORE"
 class_name = "CacheVersionStore"
+
+[[services]]
+binding = "ATTEMPT_WORKER"
+service = "attempt-worker"
 
 [[queues.producers]]
 queue = "usage-events"

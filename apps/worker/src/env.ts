@@ -1,6 +1,7 @@
 import type {
 	D1Database,
 	DurableObjectNamespace,
+	Fetcher,
 	KVNamespace,
 	Queue,
 } from "@cloudflare/workers-types";
@@ -9,6 +10,7 @@ import type { UsageQueueEvent } from "./services/usage-queue";
 export type Bindings = {
 	DB: D1Database;
 	KV_HOT?: KVNamespace;
+	ATTEMPT_WORKER?: Fetcher;
 	CORS_ORIGIN?: string;
 	PROXY_UPSTREAM_TIMEOUT_MS?: string;
 	PROXY_STREAM_USAGE_MODE?: string;

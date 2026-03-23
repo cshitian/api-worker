@@ -269,7 +269,8 @@ const resolveTarget = (target, changedFiles) => {
 	}
 	const deployUi = changedFiles.some((file) => file.startsWith("apps/ui/"));
 	const deployWorker = changedFiles.some((file) =>
-		file.startsWith("apps/worker/"),
+		file.startsWith("apps/worker/") ||
+		file.startsWith("apps/attempt-worker/"),
 	);
 	if (!deployUi && !deployWorker) {
 		return { deployUi: true, deployWorker: true };
