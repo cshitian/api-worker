@@ -57,7 +57,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_key_hash ON tokens (key_hash);
 
 CREATE TABLE IF NOT EXISTS usage_logs (
   id TEXT PRIMARY KEY,
-  trace_id TEXT,
   token_id TEXT,
   channel_id TEXT,
   model TEXT,
@@ -92,7 +91,6 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_channel_created_at ON usage_logs (chan
 CREATE INDEX IF NOT EXISTS idx_usage_logs_model_created_at ON usage_logs (model, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_upstream_status_created_at ON usage_logs (upstream_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_status_created_at ON usage_logs (status, created_at);
-CREATE INDEX IF NOT EXISTS idx_usage_logs_trace_id ON usage_logs (trace_id);
 
 CREATE TABLE IF NOT EXISTS runtime_events (
   id TEXT PRIMARY KEY,

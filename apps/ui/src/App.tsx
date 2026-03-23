@@ -122,7 +122,6 @@ const initialUsageQuery: UsageQuery = {
 	statuses: [],
 	from: "",
 	to: "",
-	trace_id: "",
 };
 
 const dashboardPresetDays: Record<DashboardQuery["preset"], number> = {
@@ -555,7 +554,6 @@ const App = () => {
 			const statuses = query.statuses.filter(Boolean);
 			const from = query.from.trim();
 			const to = query.to.trim();
-			const traceId = query.trace_id.trim();
 			if (from) {
 				params.set("from", `${from} 00:00:00`);
 			}
@@ -573,9 +571,6 @@ const App = () => {
 			}
 			if (statuses.length > 0) {
 				params.set("statuses", statuses.join(","));
-			}
-			if (traceId) {
-				params.set("trace_id", traceId);
 			}
 			const result = await apiFetch<UsageResponse>(
 				`/api/usage?${params.toString()}`,
@@ -856,7 +851,6 @@ const App = () => {
 			statuses: usageFilters.statuses.filter((value) => /^\d+$/.test(value)),
 			from: usageFilters.from.trim(),
 			to: usageFilters.to.trim(),
-			trace_id: usageFilters.trace_id.trim(),
 		};
 		startAction(actionKey);
 		setUsageQuery(nextQuery);
@@ -880,7 +874,6 @@ const App = () => {
 		usageFilters.models,
 		usageFilters.statuses,
 		usageFilters.token_ids,
-		usageFilters.trace_id,
 		usageFilters.to,
 	]);
 

@@ -565,7 +565,6 @@ function createUsageEventScheduler(
 		tokenId?: string | null;
 		model?: string | null;
 		requestSeed?: string | null;
-		traceId?: string | null;
 	},
 ): (event: UsageQueueEvent) => void {
 	const queue = c.env.USAGE_QUEUE;
@@ -597,10 +596,7 @@ function createUsageEventScheduler(
 			method: diagnostics.method ?? null,
 			tokenId: diagnostics.tokenId ?? null,
 			model: diagnostics.model ?? null,
-			context: {
-				...context,
-				trace_id: diagnostics.traceId ?? null,
-			},
+			context,
 		}).catch(() => undefined);
 		scheduleDbWrite(c, task);
 	};
@@ -776,6 +772,47 @@ async function extractErrorDetails(
 	errorMessage: string | null;
 	errorMetaJson: string | null;
 }> {
+	const extractJsonError = (
+		payload: Record<string, unknown>,
+	): {
+		errorCode: string | null;
+		errorMessage: string | null;
+		errorMetaJson: string | null;
+	} => {
+		const raw = payload as Record<string, unknown>;
+		const error =
+			raw.error && typeof raw.error === "object"
+				? (raw.error as Record<string, unknown>)
+				: raw;
+		const errorCode =
+			typeof error.code === "string"
+				? error.code
+				: typeof error.type === "string"
+					? error.type
+					: null;
+		const errorMessage =
+			typeof error.message === "string"
+				? error.message
+				: typeof raw.message === "string"
+					? raw.message
+					: null;
+		const param =
+			typeof error.param === "string"
+				? error.param
+				: typeof raw.param === "string"
+					? raw.param
+					: null;
+		return {
+			errorCode,
+			errorMessage: normalizeMessage(errorMessage),
+			errorMetaJson: JSON.stringify({
+				type: "json_error",
+				param,
+				status: response.status,
+			}),
+		};
+	};
+
 	const contentType = response.headers.get("content-type") ?? "";
 	if (contentType.includes("application/json")) {
 		const payload = await response
@@ -783,41 +820,20 @@ async function extractErrorDetails(
 			.json()
 			.catch(() => null);
 		if (payload && typeof payload === "object") {
-			const raw = payload as Record<string, unknown>;
-			const error = (raw.error ?? raw) as Record<string, unknown>;
-			const errorCode =
-				typeof error.code === "string"
-					? error.code
-					: typeof error.type === "string"
-						? error.type
-						: null;
-			const errorMessage =
-				typeof error.message === "string"
-					? error.message
-					: typeof raw.message === "string"
-						? raw.message
-						: null;
-			const param =
-				typeof error.param === "string"
-					? error.param
-					: typeof raw.param === "string"
-						? raw.param
-						: null;
-			return {
-				errorCode,
-				errorMessage: normalizeMessage(errorMessage),
-				errorMetaJson: JSON.stringify({
-					type: "json_error",
-					param,
-					status: response.status,
-				}),
-			};
+			return extractJsonError(payload as Record<string, unknown>);
 		}
 	}
 	const text = await response
 		.clone()
 		.text()
 		.catch(() => "");
+	const payloadFromText = safeJsonParse<Record<string, unknown> | null>(
+		text,
+		null,
+	);
+	if (payloadFromText && typeof payloadFromText === "object") {
+		return extractJsonError(payloadFromText);
+	}
 	const cloudflare = parseCloudflareErrorPage(text, response.status);
 	if (cloudflare) {
 		return cloudflare;
@@ -1071,21 +1087,12 @@ proxy.all("/*", tokenAuth, async (c) => {
 	const db = c.env.DB;
 	const tokenRecord = c.get("tokenRecord") as TokenRecord;
 	const requestStart = Date.now();
-	const traceId = crypto.randomUUID();
-	const withTraceHeader = (response: Response): Response => {
-		const headers = new Headers(response.headers);
-		headers.set("x-proxy-trace-id", traceId);
-		return new Response(response.body, {
-			status: response.status,
-			statusText: response.statusText,
-			headers,
-		});
-	};
+	const withTraceHeader = (response: Response): Response => response;
 	const jsonErrorWithTrace = (
 		status: Parameters<typeof jsonError>[1],
 		message: string,
 		code?: string,
-	): Response => withTraceHeader(jsonError(c, status, message, code));
+	): Response => jsonError(c, status, message, code);
 	const [cacheConfig, runtimeSettings] = await Promise.all([
 		getCacheConfig(db, c.env.CACHE_VERSION_STORE),
 		getProxyRuntimeSettings(db),
@@ -1107,7 +1114,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		parsedBody,
 	);
 	const responsesRequestHints =
-		downstreamProvider === "openai" && endpointType === "responses"
+		downstreamProvider === "openai"
 			? extractResponsesRequestHints(parsedBody)
 			: null;
 	const reasoningEffort = extractReasoningEffort(parsedBody);
@@ -1127,10 +1134,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			channelId,
 			tokenId: tokenRecord.id,
 			model: downstreamModel,
-			context: {
-				...context,
-				trace_id: traceId,
-			},
+			context,
 		}).catch(() => undefined);
 		scheduleDbWrite(c, task);
 	};
@@ -1140,7 +1144,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 		tokenId: tokenRecord.id,
 		model: downstreamModel,
 		requestSeed: String(requestStart),
-		traceId,
 	});
 	let normalizedChat: NormalizedChatRequest | null = null;
 	let normalizedEmbedding: NormalizedEmbeddingRequest | null = null;
@@ -1183,7 +1186,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 		scheduleUsageEvent({
 			type: "usage",
 			payload: {
-				traceId,
 				tokenId: tokenRecord.id,
 				channelId: null,
 				model: downstreamModel,
@@ -1227,7 +1229,6 @@ proxy.all("/*", tokenAuth, async (c) => {
 		scheduleUsageEvent({
 			type: "usage",
 			payload: {
-				traceId,
 				tokenId: tokenRecord.id,
 				channelId: options.channelId,
 				model: downstreamModel,
@@ -2008,8 +2009,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			const normalizedErrorMessage =
 				normalizeMessage(errorInfo.errorMessage) ?? normalizedErrorCode;
 				const responsesToolCallMismatch =
-					endpointType === "responses" &&
-					downstreamProvider === "openai" &&
+					responsesRequestHints?.hasFunctionCallOutput === true &&
 					isResponsesToolCallNotFoundMessage(normalizedErrorMessage);
 				const streamOptionsUnsupported =
 					shouldHandleStreamOptions &&

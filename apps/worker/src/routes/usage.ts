@@ -106,14 +106,6 @@ usage.get("/", async (c) => {
 		filters.push("token_id = ?");
 		params.push(query.token_id);
 	}
-	if (query.trace_id) {
-		const traceId = String(query.trace_id).trim();
-		if (traceId) {
-			filters.push("trace_id = ?");
-			params.push(traceId);
-		}
-	}
-
 	const channelIds = splitCsv(query.channel_ids);
 	const tokenIds = splitCsv(query.token_ids);
 	const models = splitCsv(query.models);

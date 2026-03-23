@@ -110,7 +110,6 @@ export const UsageView = ({
 	const [activeErrorLog, setActiveErrorLog] = useState<UsageLog | null>(null);
 	const usageColumns = [
 		{ id: "time", label: "时间", locked: true },
-		{ id: "trace", label: "Trace ID" },
 		{ id: "model", label: "模型" },
 		{ id: "channel", label: "渠道" },
 		{ id: "token", label: "令牌" },
@@ -155,8 +154,7 @@ export const UsageView = ({
 		filters.models.length > 0 ||
 		filters.statuses.length > 0 ||
 		filters.from.trim() ||
-		filters.to.trim() ||
-		filters.trace_id.trim();
+		filters.to.trim();
 	const showSkeleton = isRefreshing && usage.length === 0;
 	const channelOptions = useMemo(
 		() =>
@@ -348,25 +346,6 @@ export const UsageView = ({
 								onChange={(next) => onFiltersChange({ statuses: next })}
 							/>
 						</div>
-						<div>
-							<label
-								class="mb-1.5 block text-xs uppercase tracking-widest text-[color:var(--app-ink-muted)]"
-								for="usage-trace-id"
-							>
-								Trace ID
-							</label>
-							<Input
-								id="usage-trace-id"
-								type="text"
-								placeholder="输入 Trace ID 精确检索"
-								value={filters.trace_id}
-								onInput={(event) =>
-									onFiltersChange({
-										trace_id: (event.currentTarget as HTMLInputElement).value,
-									})
-								}
-							/>
-						</div>
 						<div class="flex items-end gap-2 sm:col-span-2 lg:col-span-3">
 							<Button
 								class="h-9 px-4 text-[11px]"
@@ -399,11 +378,6 @@ export const UsageView = ({
 									{visibleColumnSet.has("time") && (
 										<th class="sticky top-0 bg-[color:var(--app-surface-strong)]/95">
 											时间
-										</th>
-									)}
-									{visibleColumnSet.has("trace") && (
-										<th class="sticky top-0 bg-[color:var(--app-surface-strong)]/95">
-											Trace ID
 										</th>
 									)}
 									{visibleColumnSet.has("model") && (
@@ -514,11 +488,6 @@ export const UsageView = ({
 												{visibleColumnSet.has("time") && (
 													<td class="px-3 py-2.5 text-left text-xs text-[color:var(--app-ink)] sm:text-sm">
 														{formatDateTime(log.created_at)}
-													</td>
-												)}
-												{visibleColumnSet.has("trace") && (
-													<td class="px-3 py-2.5 text-left font-mono text-[11px] text-[color:var(--app-ink)]">
-														{log.trace_id ?? "-"}
 													</td>
 												)}
 												{visibleColumnSet.has("model") && (
@@ -696,12 +665,6 @@ export const UsageView = ({
 								<div class="flex items-center justify-between gap-3">
 									<span class="text-[color:var(--app-ink-muted)]">耗时</span>
 									<span>{formatSeconds(activeErrorLog.latency_ms)}</span>
-								</div>
-								<div class="flex items-center justify-between gap-3">
-									<span class="text-[color:var(--app-ink-muted)]">Trace ID</span>
-									<span class="font-mono text-[11px]">
-										{activeErrorLog.trace_id ?? "-"}
-									</span>
 								</div>
 								<div class="flex items-center justify-between gap-3">
 									<span class="text-[color:var(--app-ink-muted)]">失败阶段</span>

@@ -49,7 +49,6 @@ export type Token = {
 
 export type UsageLog = {
 	id: string;
-	trace_id?: string | null;
 	model: string | null;
 	channel_id: string | null;
 	channel_name?: string | null;
@@ -80,7 +79,6 @@ export type UsageQuery = {
 	statuses: string[];
 	from: string;
 	to: string;
-	trace_id: string;
 };
 
 export type UsageResponse = {
