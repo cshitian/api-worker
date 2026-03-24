@@ -17,6 +17,7 @@
     "apps/attempt-worker": {
       "name": "attempt-worker",
       "dependencies": {
+        "@ai-workers/shared-core": "workspace:*",
         "hono": "^4.2.7",
       },
       "devDependencies": {
@@ -24,6 +25,9 @@
         "typescript": "^5.4.5",
         "wrangler": "^4.76.0",
       },
+    },
+    "apps/shared-core": {
+      "name": "@ai-workers/shared-core",
     },
     "apps/ui": {
       "name": "api-worker-ui",
@@ -41,6 +45,7 @@
     "apps/worker": {
       "name": "api-worker",
       "dependencies": {
+        "@ai-workers/shared-core": "workspace:*",
         "hono": "^4.2.7",
       },
       "devDependencies": {
@@ -51,6 +56,8 @@
     },
   },
   "packages": {
+    "@ai-workers/shared-core": ["@ai-workers/shared-core@workspace:apps/shared-core"],
+
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "https://registry.npmmirror.com/@alloc/quick-lru/-/quick-lru-5.2.0.tgz", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
 
     "@biomejs/biome": ["@biomejs/biome@2.3.15", "https://registry.npmmirror.com/@biomejs/biome/-/biome-2.3.15.tgz", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.3.15", "@biomejs/cli-darwin-x64": "2.3.15", "@biomejs/cli-linux-arm64": "2.3.15", "@biomejs/cli-linux-arm64-musl": "2.3.15", "@biomejs/cli-linux-x64": "2.3.15", "@biomejs/cli-linux-x64-musl": "2.3.15", "@biomejs/cli-win32-arm64": "2.3.15", "@biomejs/cli-win32-x64": "2.3.15" }, "bin": { "biome": "bin/biome" } }, "sha512-u+jlPBAU2B45LDkjjNNYpc1PvqrM/co4loNommS9/sl9oSxsAQKsNZejYuUztvToB5oXi1tN/e62iNd6ESiY3g=="],

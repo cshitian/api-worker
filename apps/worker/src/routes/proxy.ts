@@ -1,5 +1,16 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
+import {
+	detectStreamFlagFromRawJsonRequest,
+	extractResponsesRequestHints as extractResponsesRequestHintsShared,
+	hasChatToolOutputHint as hasChatToolOutputHintShared,
+	hasUnresolvedResponsesFunctionCallOutput as hasUnresolvedResponsesFunctionCallOutputShared,
+	isResponsesToolCallNotFoundMessage as isResponsesToolCallNotFoundMessageShared,
+	repairOpenAiToolCallChain as repairOpenAiToolCallChainShared,
+	resolveLargeRequestOffload,
+	shouldTreatMissingUsageAsError,
+	validateOpenAiToolCallChain as validateOpenAiToolCallChainShared,
+} from "../../../shared-core/src";
 import { type TokenRecord, tokenAuth } from "../middleware/tokenAuth";
 import type { CallTokenItem } from "../services/call-token-selector";
 import { listCallTokens } from "../services/channel-call-token-repo";
@@ -2052,22 +2063,20 @@ proxy.all("/*", tokenAuth, async (c) => {
 			Number(runtimeSettings.large_request_offload_threshold_bytes ?? 32768),
 		),
 	);
-	const requestContentLength = Number(c.req.header("content-length") ?? "");
-	const requestContentLengthKnown =
-		Number.isFinite(requestContentLength) && requestContentLength >= 0;
 	const requestText = await c.req.text();
-	const requestSizeBytes = requestContentLengthKnown
-		? Math.floor(requestContentLength)
-		: requestText.length;
-	const shouldTryLargeRequestDispatch =
-		Boolean(c.env.ATTEMPT_WORKER) && requestSizeBytes >= offloadThresholdBytes;
+	const offloadDecision = resolveLargeRequestOffload({
+		attemptWorkerAvailable: Boolean(c.env.ATTEMPT_WORKER),
+		thresholdBytes: offloadThresholdBytes,
+		contentLengthHeader: c.req.header("content-length") ?? null,
+	});
+	const shouldTryLargeRequestDispatch = offloadDecision.shouldOffload;
 	const shouldSkipHeavyBodyParsing = shouldTryLargeRequestDispatch;
 	let parsedBody =
 		!shouldSkipHeavyBodyParsing && requestText
 			? safeJsonParse<Record<string, unknown> | null>(requestText, null)
 			: null;
 	if (!shouldSkipHeavyBodyParsing && downstreamProvider === "openai") {
-		repairOpenAiToolCallChain(parsedBody, endpointType);
+		repairOpenAiToolCallChainShared(parsedBody, endpointType);
 	}
 	const effectiveRequestText = parsedBody
 		? JSON.stringify(parsedBody)
@@ -2077,18 +2086,20 @@ proxy.all("/*", tokenAuth, async (c) => {
 		requestPath,
 		parsedBody,
 	);
-	const isStream = parseDownstreamStream(
-		downstreamProvider,
-		requestPath,
-		parsedBody,
-	);
+	const inferredStream =
+		shouldSkipHeavyBodyParsing && requestText
+			? detectStreamFlagFromRawJsonRequest(requestText)
+			: null;
+	const isStream =
+		inferredStream ??
+		parseDownstreamStream(downstreamProvider, requestPath, parsedBody);
 	const responsesRequestHints =
 		!shouldSkipHeavyBodyParsing && downstreamProvider === "openai"
-			? extractResponsesRequestHints(parsedBody)
+			? extractResponsesRequestHintsShared(parsedBody)
 			: null;
 	const hasChatToolOutput =
 		!shouldSkipHeavyBodyParsing && downstreamProvider === "openai"
-			? hasChatToolOutputHint(parsedBody)
+			? hasChatToolOutputHintShared(parsedBody)
 			: false;
 	const reasoningEffort = extractReasoningEffort(parsedBody);
 	const scheduleUsageEvent = createUsageEventScheduler(c, runtimeSettings, {
@@ -2268,7 +2279,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			);
 		}
 		if (downstreamProvider === "openai") {
-			const toolCallChainIssue = validateOpenAiToolCallChain(
+			const toolCallChainIssue = validateOpenAiToolCallChainShared(
 				parsedBody,
 				endpointType,
 				responsesRequestHints,
@@ -2381,10 +2392,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 	const canResolveResponsesAffinity = Boolean(c.env.KV_HOT);
 	const hasUnresolvedToolOutput =
 		endpointType === "responses"
-			? hasUnresolvedResponsesFunctionCallOutput(
-					parsedBody,
-					responsesRequestHints,
-				)
+		? hasUnresolvedResponsesFunctionCallOutputShared(
+				parsedBody,
+				responsesRequestHints,
+			)
 			: false;
 	const responsesPreviousResponseId =
 		responsesRequestHints?.previousResponseId ?? null;
@@ -2924,9 +2935,16 @@ proxy.all("/*", tokenAuth, async (c) => {
 							: headerUsage
 								? "header"
 								: "none";
-						if (!isStream && !immediateUsage) {
+						const hasAnyUsageSignal =
+							hasUsageHeaderSignal || hasUsageJsonSignal;
+						const failOnMissingUsage = shouldTreatMissingUsageAsError({
+							isStream,
+							bodyParsingSkipped: shouldSkipHeavyBodyParsing,
+							hasUsageSignal: hasAnyUsageSignal,
+						});
+						if (!isStream && !immediateUsage && failOnMissingUsage) {
 							const usageMissingCode =
-								hasUsageHeaderSignal || hasUsageJsonSignal
+								hasAnyUsageSignal
 									? "usage_missing.non_stream.signal_present_unparseable"
 									: "usage_missing.non_stream.signal_absent";
 							const usageMissingMessage = `usage_missing: ${usageMissingCode}`;
@@ -3028,7 +3046,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 							downstreamProvider === "openai" &&
 							(responsesRequestHints?.hasFunctionCallOutput === true ||
 								hasChatToolOutput) &&
-							isResponsesToolCallNotFoundMessage(normalizedErrorMessage);
+							isResponsesToolCallNotFoundMessageShared(normalizedErrorMessage);
 						const streamOptionsUnsupported =
 							meta.streamOptionsHandled &&
 							isStreamOptionsUnsupportedMessage(normalizedErrorMessage);
@@ -3401,10 +3419,16 @@ proxy.all("/*", tokenAuth, async (c) => {
 						: headerUsage
 							? "header"
 							: "none";
-
-					if (!isStream && !immediateUsage) {
+					const hasAnyUsageSignal =
+						hasUsageHeaderSignal || hasUsageJsonSignal;
+					const failOnMissingUsage = shouldTreatMissingUsageAsError({
+						isStream,
+						bodyParsingSkipped: shouldSkipHeavyBodyParsing,
+						hasUsageSignal: hasAnyUsageSignal,
+					});
+					if (!isStream && !immediateUsage && failOnMissingUsage) {
 						const usageMissingCode =
-							hasUsageHeaderSignal || hasUsageJsonSignal
+							hasAnyUsageSignal
 								? "usage_missing.non_stream.signal_present_unparseable"
 								: "usage_missing.non_stream.signal_absent";
 						const usageMissingMessage = `usage_missing: ${usageMissingCode}`;
@@ -3510,7 +3534,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 					downstreamProvider === "openai" &&
 					(responsesRequestHints?.hasFunctionCallOutput === true ||
 						hasChatToolOutput) &&
-					isResponsesToolCallNotFoundMessage(normalizedErrorMessage);
+					isResponsesToolCallNotFoundMessageShared(normalizedErrorMessage);
 				const streamOptionsUnsupported =
 					shouldHandleStreamOptions &&
 					isStreamOptionsUnsupportedMessage(normalizedErrorMessage);

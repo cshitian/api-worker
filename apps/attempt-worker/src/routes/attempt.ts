@@ -1,4 +1,9 @@
 import { Hono } from "hono";
+import {
+	extractResponsesRequestHints,
+	repairOpenAiToolCallChain,
+	validateOpenAiToolCallChain,
+} from "../../../shared-core/src";
 import type { AppEnv } from "../env";
 
 const ATTEMPT_RESPONSE_PATH_HEADER = "x-ha-attempt-response-path";
@@ -35,6 +40,11 @@ type AttemptExecutionResult = {
 	response: Response;
 	responsePath: string;
 	latencyMs: number;
+};
+
+type PreparedAttemptPayload = {
+	bodyText: string | undefined;
+	preflightError: Response | null;
 };
 
 const attempt = new Hono<AppEnv>();
@@ -159,6 +169,124 @@ function buildErrorResponse(
 	);
 }
 
+function buildValidationErrorResponse(
+	responsePath: string,
+	latencyMs: number,
+	errorCode: string,
+	message: string,
+): Response {
+	const outHeaders = new Headers({
+		"content-type": "application/json",
+	});
+	outHeaders.set(ATTEMPT_RESPONSE_PATH_HEADER, responsePath);
+	outHeaders.set(ATTEMPT_LATENCY_HEADER, String(latencyMs));
+	outHeaders.set(ATTEMPT_ERROR_CODE_HEADER, errorCode);
+	return new Response(
+		JSON.stringify({
+			error: {
+				type: "invalid_request_error",
+				param: null,
+				code: errorCode,
+				message,
+			},
+		}),
+		{
+			status: 409,
+			headers: outHeaders,
+		},
+	);
+}
+
+function resolveRequestPathForPreflight(
+	responsePath: string,
+	target: string,
+): string {
+	if (responsePath.startsWith("/")) {
+		return responsePath;
+	}
+	try {
+		return new URL(responsePath).pathname;
+	} catch {
+		// fall through
+	}
+	try {
+		return new URL(target).pathname;
+	} catch {
+		return responsePath;
+	}
+}
+
+function detectOpenAiEndpointType(path: string): "chat" | "responses" | null {
+	const normalized = path.toLowerCase();
+	if (normalized.endsWith("/v1/chat/completions")) {
+		return "chat";
+	}
+	if (normalized.endsWith("/v1/responses")) {
+		return "responses";
+	}
+	return null;
+}
+
+function parseJsonObjectBody(
+	bodyText: string,
+): Record<string, unknown> | null {
+	try {
+		const parsed = JSON.parse(bodyText) as unknown;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return parsed as Record<string, unknown>;
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+function preflightOpenAiToolChain(
+	requestPath: string,
+	bodyText: string | undefined,
+	latencyMs: number,
+): PreparedAttemptPayload {
+	if (!bodyText) {
+		return {
+			bodyText,
+			preflightError: null,
+		};
+	}
+	const endpointType = detectOpenAiEndpointType(requestPath);
+	if (!endpointType) {
+		return {
+			bodyText,
+			preflightError: null,
+		};
+	}
+	const parsedBody = parseJsonObjectBody(bodyText);
+	if (!parsedBody) {
+		return {
+			bodyText,
+			preflightError: null,
+		};
+	}
+	repairOpenAiToolCallChain(parsedBody, endpointType);
+	const hints =
+		endpointType === "responses" ? extractResponsesRequestHints(parsedBody) : null;
+	const issue = validateOpenAiToolCallChain(parsedBody, endpointType, hints);
+	if (issue) {
+		return {
+			bodyText,
+			preflightError: buildValidationErrorResponse(
+				requestPath,
+				latencyMs,
+				issue.code,
+				issue.message,
+			),
+		};
+	}
+	return {
+		bodyText: JSON.stringify(parsedBody),
+		preflightError: null,
+	};
+}
+
 async function executeSingleAttempt(
 	body: AttemptRequest,
 	overrideBodyText?: string | null,
@@ -175,9 +303,23 @@ async function executeSingleAttempt(
 	const requestInit: RequestInit = {
 		method: body.method,
 		headers,
-		body: overrideBodyText ?? body.bodyText ?? undefined,
+		body: undefined,
 	};
 	let responsePath = body.responsePath?.trim() || body.target;
+	const requestPath = resolveRequestPathForPreflight(responsePath, body.target);
+	const prepared = preflightOpenAiToolChain(
+		requestPath,
+		overrideBodyText ?? body.bodyText ?? undefined,
+		Date.now() - start,
+	);
+	if (prepared.preflightError) {
+		return {
+			response: prepared.preflightError,
+			responsePath,
+			latencyMs: Date.now() - start,
+		};
+	}
+	requestInit.body = prepared.bodyText;
 	try {
 		let response = await fetchWithTimeout(body.target, requestInit, timeoutMs);
 		if (
