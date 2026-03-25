@@ -14,6 +14,8 @@ export function resolveLargeRequestOffload(
 	input: OffloadDecisionInput,
 ): OffloadDecision {
 	const thresholdBytes = Math.max(0, Math.floor(Number(input.thresholdBytes || 0)));
+	// threshold <= 0 means offload is disabled.
+	const offloadEnabled = thresholdBytes > 0;
 	const contentLengthHeader = input.contentLengthHeader?.trim() ?? "";
 	const contentLength = Number(contentLengthHeader);
 	const requestSizeKnown =
@@ -21,7 +23,7 @@ export function resolveLargeRequestOffload(
 		Number.isFinite(contentLength) &&
 		contentLength >= 0;
 	const requestSizeBytes = requestSizeKnown ? Math.floor(contentLength) : null;
-	if (!input.attemptWorkerAvailable) {
+	if (!input.attemptWorkerAvailable || !offloadEnabled) {
 		return {
 			shouldOffload: false,
 			requestSizeKnown,
@@ -30,7 +32,8 @@ export function resolveLargeRequestOffload(
 	}
 	if (!requestSizeKnown) {
 		return {
-			shouldOffload: true,
+			// Unknown size defaults to local handling; caller may use exact body size.
+			shouldOffload: false,
 			requestSizeKnown,
 			requestSizeBytes,
 		};

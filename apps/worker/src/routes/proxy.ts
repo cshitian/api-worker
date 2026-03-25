@@ -1945,6 +1945,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			Number(runtimeSettings.large_request_offload_threshold_bytes ?? 32768),
 		),
 	);
+	const offloadEnabled = offloadThresholdBytes > 0;
 	const requestText = await c.req.text();
 	const offloadDecision = resolveLargeRequestOffload({
 		attemptWorkerAvailable: Boolean(c.env.ATTEMPT_WORKER),
@@ -1954,10 +1955,12 @@ proxy.all("/*", tokenAuth, async (c) => {
 	const requestSizeBytes = offloadDecision.requestSizeKnown
 		? (offloadDecision.requestSizeBytes ?? 0)
 		: requestText.length;
-	const shouldTryLargeRequestDispatch = offloadDecision.requestSizeKnown
-		? offloadDecision.shouldOffload
-		: Boolean(c.env.ATTEMPT_WORKER) &&
-			requestSizeBytes >= offloadThresholdBytes;
+	const shouldTryLargeRequestDispatch =
+		offloadEnabled &&
+		(offloadDecision.requestSizeKnown
+			? offloadDecision.shouldOffload
+			: Boolean(c.env.ATTEMPT_WORKER) &&
+				requestSizeBytes >= offloadThresholdBytes);
 	const shouldSkipHeavyBodyParsing = shouldTryLargeRequestDispatch;
 	let parsedBody =
 		!shouldSkipHeavyBodyParsing && requestText
@@ -2268,7 +2271,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 	}
 	const allowedChannels = filterAllowedChannels(activeChannelRows, tokenRecord);
 	const verifiedModelsByChannel =
-		downstreamModel && !shouldSkipHeavyBodyParsing
+		downstreamModel
 			? await listVerifiedModelsByChannel(
 					db,
 					allowedChannels.map((channel) => channel.id),
