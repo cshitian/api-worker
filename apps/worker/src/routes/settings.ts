@@ -6,6 +6,7 @@ import {
 } from "../services/checkin-scheduler";
 import {
 	getCheckinScheduleTime,
+	normalizeErrorCodeList,
 	getProxyRuntimeSettings,
 	getRetentionDays,
 	getRuntimeProxyConfig,
@@ -66,6 +67,9 @@ settings.put("/", async (c) => {
 	const runtimePatch: {
 		upstream_timeout_ms?: number;
 		retry_max_retries?: number;
+		retry_sleep_ms?: number;
+		retry_skip_error_codes?: string[];
+		retry_sleep_error_codes?: string[];
 		zero_completion_as_error_enabled?: boolean;
 		model_failure_cooldown_minutes?: number;
 		model_failure_cooldown_threshold?: number;
@@ -139,6 +143,48 @@ settings.put("/", async (c) => {
 			);
 		}
 		runtimePatch.retry_max_retries = retryMaxRetries;
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_retry_sleep_ms !== undefined) {
+		const sleepMs = Number(body.proxy_retry_sleep_ms);
+		if (Number.isNaN(sleepMs) || sleepMs < 0 || !Number.isInteger(sleepMs)) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_retry_sleep_ms",
+				"invalid_proxy_retry_sleep_ms",
+			);
+		}
+		runtimePatch.retry_sleep_ms = sleepMs;
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_retry_skip_error_codes !== undefined) {
+		const normalized = normalizeErrorCodeList(body.proxy_retry_skip_error_codes);
+		if (!normalized) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_retry_skip_error_codes",
+				"invalid_proxy_retry_skip_error_codes",
+			);
+		}
+		runtimePatch.retry_skip_error_codes = normalized;
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_retry_sleep_error_codes !== undefined) {
+		const normalized = normalizeErrorCodeList(body.proxy_retry_sleep_error_codes);
+		if (!normalized) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_retry_sleep_error_codes",
+				"invalid_proxy_retry_sleep_error_codes",
+			);
+		}
+		runtimePatch.retry_sleep_error_codes = normalized;
 		runtimeTouched = true;
 	}
 

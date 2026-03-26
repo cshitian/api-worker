@@ -33,6 +33,16 @@ const DEFAULT_CACHE_CALL_TOKENS_TTL_SECONDS = 15;
 const DEFAULT_CACHE_SETTINGS_TTL_SECONDS = 30;
 const DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS = 180000;
 const DEFAULT_PROXY_RETRY_MAX_RETRIES = 5;
+const DEFAULT_PROXY_RETRY_SLEEP_MS = 1000;
+const DEFAULT_PROXY_RETRY_SKIP_ERROR_CODES = [
+	"model_not_found",
+	"no_available_providers",
+	"no_available_channels",
+];
+const DEFAULT_PROXY_RETRY_SLEEP_ERROR_CODES = [
+	"system_cpu_overloaded",
+	"system_disk_overloaded",
+];
 const DEFAULT_PROXY_ZERO_COMPLETION_AS_ERROR_ENABLED = true;
 const DEFAULT_PROXY_ATTEMPT_WORKER_FALLBACK_ENABLED = true;
 const DEFAULT_PROXY_ATTEMPT_WORKER_FALLBACK_THRESHOLD = 3;
@@ -64,6 +74,9 @@ const CACHE_VERSION_CALL_TOKENS_KEY = "cache_v_call_tokens";
 const CACHE_VERSION_SETTINGS_KEY = "cache_v_settings";
 const PROXY_UPSTREAM_TIMEOUT_KEY = "proxy_upstream_timeout_ms";
 const PROXY_RETRY_MAX_RETRIES_KEY = "proxy_retry_max_retries";
+const PROXY_RETRY_SLEEP_MS_KEY = "proxy_retry_sleep_ms";
+const PROXY_RETRY_SKIP_ERROR_CODES_KEY = "proxy_retry_skip_error_codes";
+const PROXY_RETRY_SLEEP_ERROR_CODES_KEY = "proxy_retry_sleep_error_codes";
 const PROXY_ZERO_COMPLETION_AS_ERROR_KEY =
 	"proxy_zero_completion_as_error_enabled";
 const PROXY_STREAM_USAGE_MODE_KEY = "proxy_stream_usage_mode";
@@ -86,6 +99,9 @@ const ATTEMPT_LOG_RETENTION_DAYS_KEY = "attempt_log_retention_days";
 export type RuntimeProxyConfig = {
 	upstream_timeout_ms: number;
 	retry_max_retries: number;
+	retry_sleep_ms: number;
+	retry_skip_error_codes: string[];
+	retry_sleep_error_codes: string[];
 	zero_completion_as_error_enabled: boolean;
 	model_failure_cooldown_minutes: number;
 	model_failure_cooldown_threshold: number;
@@ -104,6 +120,9 @@ export type RuntimeProxyConfig = {
 export type ProxyRuntimeSettings = {
 	upstream_timeout_ms: number;
 	retry_max_retries: number;
+	retry_sleep_ms: number;
+	retry_skip_error_codes: string[];
+	retry_sleep_error_codes: string[];
 	zero_completion_as_error_enabled: boolean;
 	model_failure_cooldown_minutes: number;
 	model_failure_cooldown_threshold: number;
@@ -353,6 +372,39 @@ function normalizeStreamUsageMode(value: string | undefined): string {
 	return DEFAULT_PROXY_STREAM_USAGE_MODE;
 }
 
+export function normalizeErrorCodeList(input: unknown): string[] | null {
+	let values: string[] = [];
+	if (typeof input === "string") {
+		values = input.split(/[,\n]/g);
+	} else if (Array.isArray(input)) {
+		values = input.filter((item) => typeof item === "string") as string[];
+	} else {
+		return null;
+	}
+	const normalized = values
+		.map((item) => item.trim().toLowerCase())
+		.filter((item) => item.length > 0);
+	return Array.from(new Set(normalized));
+}
+
+function stringifyErrorCodeList(codes: string[]): string {
+	return Array.from(
+		new Set(
+			codes
+				.map((code) => code.trim().toLowerCase())
+				.filter((code) => code.length > 0),
+		),
+	).join(",");
+}
+
+function parseErrorCodeListSetting(
+	value: string | null,
+	fallback: string[],
+): string[] {
+	const normalized = normalizeErrorCodeList(value);
+	return normalized ?? [...fallback];
+}
+
 async function getSettingsCacheControl(
 	db: D1Database,
 ): Promise<SettingsCacheControl> {
@@ -391,6 +443,18 @@ export async function getProxyRuntimeSettings(
 	const retryMaxRetries = parseNonNegativeSetting(
 		settings[PROXY_RETRY_MAX_RETRIES_KEY] ?? null,
 		DEFAULT_PROXY_RETRY_MAX_RETRIES,
+	);
+	const retrySleepMs = parseNonNegativeSetting(
+		settings[PROXY_RETRY_SLEEP_MS_KEY] ?? null,
+		DEFAULT_PROXY_RETRY_SLEEP_MS,
+	);
+	const retrySkipErrorCodes = parseErrorCodeListSetting(
+		settings[PROXY_RETRY_SKIP_ERROR_CODES_KEY] ?? null,
+		DEFAULT_PROXY_RETRY_SKIP_ERROR_CODES,
+	);
+	const retrySleepErrorCodes = parseErrorCodeListSetting(
+		settings[PROXY_RETRY_SLEEP_ERROR_CODES_KEY] ?? null,
+		DEFAULT_PROXY_RETRY_SLEEP_ERROR_CODES,
 	);
 	const zeroCompletionAsErrorEnabled = parseBooleanSetting(
 		settings[PROXY_ZERO_COMPLETION_AS_ERROR_KEY] ?? null,
@@ -450,6 +514,9 @@ export async function getProxyRuntimeSettings(
 	return {
 		upstream_timeout_ms: upstreamTimeout,
 		retry_max_retries: retryMaxRetries,
+		retry_sleep_ms: retrySleepMs,
+		retry_skip_error_codes: retrySkipErrorCodes,
+		retry_sleep_error_codes: retrySleepErrorCodes,
 		zero_completion_as_error_enabled: zeroCompletionAsErrorEnabled,
 		model_failure_cooldown_minutes: modelFailureCooldownMinutes,
 		model_failure_cooldown_threshold: modelFailureCooldownThreshold,
@@ -507,6 +574,33 @@ export async function setProxyRuntimeSettings(
 				db,
 				PROXY_RETRY_MAX_RETRIES_KEY,
 				String(Math.max(0, Math.floor(update.retry_max_retries))),
+			),
+		);
+	}
+	if (update.retry_sleep_ms !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RETRY_SLEEP_MS_KEY,
+				String(Math.max(0, Math.floor(update.retry_sleep_ms))),
+			),
+		);
+	}
+	if (update.retry_skip_error_codes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RETRY_SKIP_ERROR_CODES_KEY,
+				stringifyErrorCodeList(update.retry_skip_error_codes),
+			),
+		);
+	}
+	if (update.retry_sleep_error_codes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RETRY_SLEEP_ERROR_CODES_KEY,
+				stringifyErrorCodeList(update.retry_sleep_error_codes),
 			),
 		);
 	}

@@ -26,6 +26,12 @@ function normalizeOffset(value: unknown): number {
 	return Number.isNaN(raw) ? 0 : Math.max(0, Math.floor(raw));
 }
 
+function normalizeErrorCodeLimit(value: unknown): number {
+	const raw = Number(value ?? 200);
+	const normalized = Number.isNaN(raw) ? 200 : Math.floor(raw);
+	return Math.min(Math.max(normalized, 1), 1000);
+}
+
 function applyInFilter(
 	field: string,
 	values: string[],
@@ -73,6 +79,37 @@ async function buildNameMap(
 	}
 	return map;
 }
+
+/**
+ * Returns distinct error codes from usage logs.
+ */
+usage.get("/error-codes", async (c) => {
+	const db = c.env.DB;
+	const limit = normalizeErrorCodeLimit(c.req.query("limit"));
+	const retention = await getRetentionDays(db);
+	await pruneUsageLogs(db, retention);
+
+	const rows = await db
+		.prepare(
+			[
+				"SELECT error_code, COUNT(*) AS trace_count",
+				"FROM usage_logs",
+				"WHERE error_code IS NOT NULL AND TRIM(error_code) != ''",
+				"GROUP BY error_code",
+				"ORDER BY trace_count DESC, error_code ASC",
+				"LIMIT ?",
+			].join(" "),
+		)
+		.bind(limit)
+		.all<{ error_code: string; trace_count: number }>();
+
+	const items = (rows.results ?? []).map((row) => ({
+		error_code: String(row.error_code ?? "").trim(),
+		trace_count: Number(row.trace_count ?? 0),
+	}));
+
+	return c.json({ items });
+});
 
 /**
  * Lists usage logs with filters.

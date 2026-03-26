@@ -12,6 +12,7 @@ const ATTEMPT_UPSTREAM_REQUEST_ID_HEADER = "x-ha-attempt-upstream-request-id";
 const ATTEMPT_ERROR_CODE_HEADER = "x-ha-attempt-error-code";
 const DISPATCH_ATTEMPT_INDEX_HEADER = "x-ha-dispatch-attempt-index";
 const DISPATCH_CHANNEL_ID_HEADER = "x-ha-dispatch-channel-id";
+const DISPATCH_STOP_RETRY_HEADER = "x-ha-dispatch-stop-retry";
 const STREAM_OPTIONS_UNSUPPORTED_SNIPPET = "unsupported parameter";
 const STREAM_OPTIONS_PARAM_NAME = "stream_options";
 
@@ -34,6 +35,7 @@ type DispatchAttemptRequest = AttemptRequest & {
 
 type DispatchRequest = {
 	attempts?: DispatchAttemptRequest[];
+	retryConfig?: RetryConfigPayload | null;
 };
 
 type AttemptExecutionResult = {
@@ -45,6 +47,18 @@ type AttemptExecutionResult = {
 type PreparedAttemptPayload = {
 	bodyText: string | undefined;
 	preflightError: Response | null;
+};
+
+type RetryConfigPayload = {
+	sleepMs?: number;
+	skipErrorCodes?: string[];
+	sleepErrorCodes?: string[];
+};
+
+type RetryConfig = {
+	sleepMs: number;
+	skipErrorCodeSet: Set<string>;
+	sleepErrorCodeSet: Set<string>;
 };
 
 const attempt = new Hono<AppEnv>();
@@ -86,6 +100,91 @@ function isStreamOptionsUnsupportedMessage(message: string | null): boolean {
 		normalized.includes(STREAM_OPTIONS_UNSUPPORTED_SNIPPET) &&
 		normalized.includes(STREAM_OPTIONS_PARAM_NAME)
 	);
+}
+
+function sleep(delayMs: number): Promise<void> {
+	const safeDelay = Math.max(0, Math.floor(delayMs));
+	if (safeDelay <= 0) {
+		return Promise.resolve();
+	}
+	return new Promise((resolve) => {
+		setTimeout(resolve, safeDelay);
+	});
+}
+
+function normalizeRetryErrorCode(value: string | null): string {
+	return normalizeMessage(value)?.toLowerCase() ?? "";
+}
+
+function normalizeRetryErrorCodeList(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const normalized = value
+		.filter((item) => typeof item === "string")
+		.map((item) => normalizeRetryErrorCode(item as string))
+		.filter((item) => item.length > 0);
+	return Array.from(new Set(normalized));
+}
+
+function normalizeRetryConfig(
+	payload: RetryConfigPayload | null | undefined,
+): RetryConfig {
+	const sleepRaw = Number(payload?.sleepMs ?? 0);
+	const sleepMs = Number.isFinite(sleepRaw) && sleepRaw >= 0
+		? Math.floor(sleepRaw)
+		: 0;
+	return {
+		sleepMs,
+		skipErrorCodeSet: new Set(
+			normalizeRetryErrorCodeList(payload?.skipErrorCodes),
+		),
+		sleepErrorCodeSet: new Set(
+			normalizeRetryErrorCodeList(payload?.sleepErrorCodes),
+		),
+	};
+}
+
+function isNoAvailableChannelMessage(message: string | null): boolean {
+	const normalized = normalizeMessage(message)?.toLowerCase() ?? "";
+	if (!normalized) {
+		return false;
+	}
+	return (
+		normalized.includes("no available channel") ||
+		normalized.includes("无可用渠道") ||
+		normalized.includes("no available providers") ||
+		normalized.includes("无可用供应商")
+	);
+}
+
+function resolveRetryDecision(
+	retryConfig: RetryConfig,
+	errorCode: string | null,
+	errorMessage: string | null,
+): {
+	shouldSkip: boolean;
+	sleepMs: number;
+} {
+	const normalizedCode = normalizeRetryErrorCode(errorCode);
+	const lookup: string[] = [];
+	if (normalizedCode === "pond_hub_error" && isNoAvailableChannelMessage(errorMessage)) {
+		lookup.push("model_not_found");
+	}
+	if (normalizedCode) {
+		lookup.push(normalizedCode);
+	}
+	for (const key of lookup) {
+		if (retryConfig.skipErrorCodeSet.has(key)) {
+			return { shouldSkip: true, sleepMs: 0 };
+		}
+	}
+	for (const key of lookup) {
+		if (retryConfig.sleepErrorCodeSet.has(key)) {
+			return { shouldSkip: false, sleepMs: retryConfig.sleepMs };
+		}
+	}
+	return { shouldSkip: false, sleepMs: 0 };
 }
 
 async function fetchWithTimeout(
@@ -135,6 +234,38 @@ async function extractErrorMessage(response: Response): Promise<string | null> {
 		.text()
 		.catch(() => "");
 	return normalizeMessage(text);
+}
+
+async function extractErrorCode(response: Response): Promise<string | null> {
+	const direct = normalizeMessage(response.headers.get(ATTEMPT_ERROR_CODE_HEADER));
+	if (direct) {
+		return direct;
+	}
+	const contentType = response.headers.get("content-type") ?? "";
+	if (contentType.includes("application/json")) {
+		const payload = await response
+			.clone()
+			.json()
+			.catch(() => null);
+		if (payload && typeof payload === "object") {
+			const record = payload as Record<string, unknown>;
+			const error =
+				record.error && typeof record.error === "object"
+					? (record.error as Record<string, unknown>)
+					: null;
+			const code =
+				typeof error?.code === "string"
+					? error.code
+					: typeof record.code === "string"
+						? record.code
+						: null;
+			const normalized = normalizeMessage(code);
+			if (normalized) {
+				return normalized;
+			}
+		}
+	}
+	return `upstream_http_${response.status}`;
 }
 
 function buildErrorResponse(
@@ -378,6 +509,7 @@ attempt.post("/", async (c) => {
 attempt.post("/dispatch", async (c) => {
 	const body = await c.req.json<DispatchRequest>().catch(() => null);
 	const attempts = Array.isArray(body?.attempts) ? body.attempts : [];
+	const retryConfig = normalizeRetryConfig(body?.retryConfig);
 	if (attempts.length === 0) {
 		return c.json({ error: "invalid_dispatch_payload" }, 400);
 	}
@@ -414,13 +546,34 @@ attempt.post("/dispatch", async (c) => {
 				[DISPATCH_CHANNEL_ID_HEADER]: channelId,
 			});
 		}
+		const errorCode = await extractErrorCode(result.response);
+		const errorMessage = await extractErrorMessage(result.response);
+		const hasNextAttempt = attemptIndex + 1 < attempts.length;
+		if (hasNextAttempt) {
+			const decision = resolveRetryDecision(retryConfig, errorCode, errorMessage);
+			if (decision.shouldSkip) {
+				return attachAttemptHeaders(result, {
+					[DISPATCH_ATTEMPT_INDEX_HEADER]: String(attemptIndex),
+					[DISPATCH_CHANNEL_ID_HEADER]: channelId,
+					[DISPATCH_STOP_RETRY_HEADER]: "1",
+				});
+			}
+			if (decision.sleepMs > 0) {
+				await sleep(decision.sleepMs);
+			}
+		}
 	}
 	if (!lastResult) {
 		return c.json({ error: "dispatch_no_valid_attempt" }, 400);
 	}
+	const lastErrorCode = await extractErrorCode(lastResult.result.response);
+	const lastErrorMessage = await extractErrorMessage(lastResult.result.response);
+	const shouldStopRetry =
+		resolveRetryDecision(retryConfig, lastErrorCode, lastErrorMessage).shouldSkip;
 	return attachAttemptHeaders(lastResult.result, {
 		[DISPATCH_ATTEMPT_INDEX_HEADER]: String(lastResult.attemptIndex),
 		[DISPATCH_CHANNEL_ID_HEADER]: lastResult.channelId,
+		...(shouldStopRetry ? { [DISPATCH_STOP_RETRY_HEADER]: "1" } : {}),
 	});
 });
 

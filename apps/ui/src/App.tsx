@@ -284,6 +284,9 @@ const App = () => {
 	});
 	const [settingsForm, setSettingsForm] =
 		useState<SettingsForm>(initialSettingsForm);
+	const [retryErrorCodeOptions, setRetryErrorCodeOptions] = useState<string[]>(
+		[],
+	);
 	const [sitePage, setSitePage] = useState(1);
 	const [sitePageSize, setSitePageSize] = useState(() =>
 		loadPageSizePref("pageSize:sites", 10),
@@ -606,6 +609,20 @@ const App = () => {
 		setData((prev) => ({ ...prev, settings }));
 	}, [apiFetch]);
 
+	const loadRetryErrorCodes = useCallback(async () => {
+		const result = await apiFetch<{
+			items?: Array<{ error_code?: string | null }>;
+		}>("/api/usage/error-codes?limit=500");
+		const codes = Array.from(
+			new Set(
+				(result.items ?? [])
+					.map((item) => String(item.error_code ?? "").trim())
+					.filter(Boolean),
+			),
+		).sort((left, right) => left.localeCompare(right));
+		setRetryErrorCodeOptions(codes);
+	}, [apiFetch]);
+
 	const loadTab = useCallback(
 		async (tabId: TabId) => {
 			setLoading(true);
@@ -632,7 +649,7 @@ const App = () => {
 					]);
 				}
 				if (tabId === "settings") {
-					await loadSettings();
+					await Promise.all([loadSettings(), loadRetryErrorCodes()]);
 				}
 			} catch (error) {
 				pushNotice("error", (error as Error).message);
@@ -644,6 +661,7 @@ const App = () => {
 			dismissNotice,
 			loadDashboard,
 			loadModels,
+			loadRetryErrorCodes,
 			loadSettings,
 			loadSites,
 			loadTokens,
@@ -690,6 +708,18 @@ const App = () => {
 				runtimeSettings?.upstream_timeout_ms ?? 180000,
 			),
 			proxy_retry_max_retries: String(runtimeSettings?.retry_max_retries ?? 5),
+			proxy_retry_sleep_ms: String(runtimeSettings?.retry_sleep_ms ?? 1000),
+			proxy_retry_skip_error_codes:
+				runtimeSettings?.retry_skip_error_codes ?? [
+					"model_not_found",
+					"no_available_providers",
+					"no_available_channels",
+				],
+			proxy_retry_sleep_error_codes:
+				runtimeSettings?.retry_sleep_error_codes ?? [
+					"system_cpu_overloaded",
+					"system_disk_overloaded",
+				],
 			proxy_zero_completion_as_error_enabled:
 				runtimeSettings?.zero_completion_as_error_enabled ?? true,
 			proxy_stream_usage_mode: runtimeSettings?.stream_usage_mode ?? "full",
@@ -1341,6 +1371,22 @@ const App = () => {
 			);
 			const upstreamTimeoutMs = Number(settingsForm.proxy_upstream_timeout_ms);
 			const retryMaxRetries = Number(settingsForm.proxy_retry_max_retries);
+			const retrySleepMs = Number(settingsForm.proxy_retry_sleep_ms);
+			const normalizeErrorCodeList = (value: string[]): string[] => {
+				return Array.from(
+					new Set(
+						value
+							.map((item) => String(item ?? "").trim())
+							.filter(Boolean),
+					),
+				);
+			};
+			const retrySkipErrorCodes = normalizeErrorCodeList(
+				settingsForm.proxy_retry_skip_error_codes,
+			);
+			const retrySleepErrorCodes = normalizeErrorCodeList(
+				settingsForm.proxy_retry_sleep_error_codes,
+			);
 			const streamUsageMode = settingsForm.proxy_stream_usage_mode
 				.trim()
 				.toLowerCase();
@@ -1398,6 +1444,10 @@ const App = () => {
 				pushNotice("warning", "重发次数需为非负整数");
 				return;
 			}
+			if (Number.isNaN(retrySleepMs) || retrySleepMs < 0 || !Number.isInteger(retrySleepMs)) {
+				pushNotice("warning", "统一等待时间需为非负整数");
+				return;
+			}
 			if (!["full", "lite", "off"].includes(streamUsageMode)) {
 				pushNotice("warning", "流式解析模式需为 full/lite/off");
 				return;
@@ -1450,10 +1500,7 @@ const App = () => {
 				return;
 			}
 			startAction(actionKey);
-			const payload: Record<
-				string,
-				number | string | boolean | string[] | number[]
-			> = {
+			const payload: Record<string, unknown> = {
 				log_retention_days: retention,
 				session_ttl_hours: sessionTtlHours,
 				checkin_schedule_time:
@@ -1462,6 +1509,9 @@ const App = () => {
 				proxy_model_failure_cooldown_threshold: failureCooldownThreshold,
 				proxy_upstream_timeout_ms: upstreamTimeoutMs,
 				proxy_retry_max_retries: retryMaxRetries,
+				proxy_retry_sleep_ms: retrySleepMs,
+				proxy_retry_skip_error_codes: retrySkipErrorCodes,
+				proxy_retry_sleep_error_codes: retrySleepErrorCodes,
 				proxy_zero_completion_as_error_enabled:
 					settingsForm.proxy_zero_completion_as_error_enabled,
 				proxy_stream_usage_mode: streamUsageMode,
@@ -1486,7 +1536,7 @@ const App = () => {
 					method: "PUT",
 					body: JSON.stringify(payload),
 				});
-				await loadSettings();
+				await Promise.all([loadSettings(), loadRetryErrorCodes()]);
 				setSettingsForm((prev) => ({ ...prev, admin_password: "" }));
 				pushNotice("success", "设置已更新");
 			} catch (error) {
@@ -1499,6 +1549,7 @@ const App = () => {
 			apiFetch,
 			endAction,
 			isActionPending,
+			loadRetryErrorCodes,
 			loadSettings,
 			pushNotice,
 			settingsForm,
@@ -2059,6 +2110,7 @@ const App = () => {
 					settingsForm={settingsForm}
 					adminPasswordSet={data.settings?.admin_password_set ?? false}
 					runtimeConfig={data.settings?.runtime_config ?? null}
+					retryErrorCodeOptions={retryErrorCodeOptions}
 					isSaving={isActionPending(buildActionKey("settings:submit"))}
 					onSubmit={handleSettingsSubmit}
 					onFormChange={handleSettingsFormChange}

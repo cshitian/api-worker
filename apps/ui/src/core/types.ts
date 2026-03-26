@@ -134,6 +134,9 @@ export type Settings = {
 export type RuntimeProxySettings = {
 	upstream_timeout_ms: number;
 	retry_max_retries: number;
+	retry_sleep_ms: number;
+	retry_skip_error_codes: string[];
+	retry_sleep_error_codes: string[];
 	zero_completion_as_error_enabled: boolean;
 	model_failure_cooldown_minutes: number;
 	model_failure_cooldown_threshold: number;
@@ -213,6 +216,9 @@ export type SettingsForm = {
 	proxy_model_failure_cooldown_threshold: string;
 	proxy_upstream_timeout_ms: string;
 	proxy_retry_max_retries: string;
+	proxy_retry_sleep_ms: string;
+	proxy_retry_skip_error_codes: string[];
+	proxy_retry_sleep_error_codes: string[];
 	proxy_zero_completion_as_error_enabled: boolean;
 	proxy_stream_usage_mode: string;
 	proxy_stream_usage_max_bytes: string;

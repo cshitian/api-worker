@@ -58,7 +58,10 @@ import {
 	readHotJson,
 	writeHotJson,
 } from "../services/hot-kv";
-import { getCacheConfig, getProxyRuntimeSettings } from "../services/settings";
+import {
+	getCacheConfig,
+	getProxyRuntimeSettings,
+} from "../services/settings";
 import {
 	processUsageEvent,
 	type UsageEvent,
@@ -150,6 +153,7 @@ const ATTEMPT_BINDING_UPSTREAM_REQUEST_ID_HEADER =
 	"x-ha-attempt-upstream-request-id";
 const ATTEMPT_DISPATCH_INDEX_HEADER = "x-ha-dispatch-attempt-index";
 const ATTEMPT_DISPATCH_CHANNEL_ID_HEADER = "x-ha-dispatch-channel-id";
+const ATTEMPT_DISPATCH_STOP_RETRY_HEADER = "x-ha-dispatch-stop-retry";
 const ATTEMPT_BINDING_DISPATCH_ERROR_CODE =
 	"attempt_binding_dispatch_unavailable";
 const ATTEMPT_BINDING_ATTEMPT_ERROR_CODE = "attempt_binding_call_unavailable";
@@ -1298,6 +1302,96 @@ function normalizeUpstreamErrorCode(
 	return `upstream_http_${status}`;
 }
 
+function sleep(delayMs: number): Promise<void> {
+	const safeDelay = Math.max(0, Math.floor(delayMs));
+	if (safeDelay <= 0) {
+		return Promise.resolve();
+	}
+	return new Promise((resolve) => {
+		setTimeout(resolve, safeDelay);
+	});
+}
+
+function normalizeRetryErrorCode(value: string | null): string {
+	return normalizeMessage(value)?.toLowerCase() ?? "";
+}
+
+function isNoAvailableChannelMessage(message: string | null): boolean {
+	const normalized = normalizeMessage(message)?.toLowerCase() ?? "";
+	if (!normalized) {
+		return false;
+	}
+	return (
+		normalized.includes("no available channel") ||
+		normalized.includes("无可用渠道") ||
+		normalized.includes("no available providers") ||
+		normalized.includes("无可用供应商")
+	);
+}
+
+function buildRetryErrorCodeSet(codes: string[]): Set<string> {
+	const normalized = codes
+		.map((code) => normalizeRetryErrorCode(code))
+		.filter((code) => code.length > 0);
+	return new Set(normalized);
+}
+
+function resolveRetryDecision(
+	skipErrorCodeSet: Set<string>,
+	sleepErrorCodeSet: Set<string>,
+	sleepMs: number,
+	errorCode: string | null,
+	errorMessage: string | null,
+): {
+	shouldSkip: boolean;
+	sleepMs: number;
+} {
+	const normalizedErrorCode = normalizeRetryErrorCode(errorCode);
+	const lookupKeys: string[] = [];
+	if (normalizedErrorCode === "pond_hub_error") {
+		if (isNoAvailableChannelMessage(errorMessage)) {
+			lookupKeys.push("model_not_found");
+		}
+	}
+	if (normalizedErrorCode) {
+		lookupKeys.push(normalizedErrorCode);
+	}
+	for (const key of lookupKeys) {
+		if (skipErrorCodeSet.has(key)) {
+			return { shouldSkip: true, sleepMs: 0 };
+		}
+	}
+	for (const key of lookupKeys) {
+		if (sleepErrorCodeSet.has(key)) {
+			return {
+				shouldSkip: false,
+				sleepMs: Math.max(0, Math.floor(sleepMs)),
+			};
+		}
+	}
+	return { shouldSkip: false, sleepMs: 0 };
+}
+
+function buildAttemptSequence(
+	candidates: ChannelRecord[],
+	maxAttempts: number,
+): ChannelRecord[] {
+	if (candidates.length === 0 || maxAttempts <= 0) {
+		return [];
+	}
+	const ordered: ChannelRecord[] = [];
+	while (ordered.length < maxAttempts) {
+		const round = createWeightedOrder(candidates);
+		for (const channel of round) {
+			ordered.push(channel);
+			if (ordered.length >= maxAttempts) {
+				break;
+			}
+		}
+	}
+	return ordered;
+}
+
 function getStreamUsageOptions(settings: {
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
@@ -1686,8 +1780,15 @@ type AttemptDispatchRequest = {
 	strippedBodyText?: string;
 };
 
+type DispatchRetryConfig = {
+	sleepMs: number;
+	skipErrorCodes: string[];
+	sleepErrorCodes: string[];
+};
+
 type DispatchBindingRequest = {
 	attempts: AttemptDispatchRequest[];
+	retryConfig?: DispatchRetryConfig;
 };
 
 type AttemptBindingSuccess = {
@@ -1706,6 +1807,7 @@ type DispatchBindingSuccess = {
 	upstreamRequestId: string | null;
 	attemptIndex: number;
 	channelId: string | null;
+	stopRetry: boolean;
 };
 
 type AttemptBindingFailure = {
@@ -1768,6 +1870,14 @@ function parseAttemptIndexHeader(value: string | null): number | null {
 		return null;
 	}
 	return parsed;
+}
+
+function parseBooleanHeader(value: string | null): boolean {
+	if (!value) {
+		return false;
+	}
+	const normalized = value.trim().toLowerCase();
+	return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
 type HeaderLookup = {
@@ -1941,6 +2051,9 @@ async function executeDispatchViaWorker(
 			),
 			attemptIndex,
 			channelId,
+			stopRetry: parseBooleanHeader(
+				response.headers.get(ATTEMPT_DISPATCH_STOP_RETRY_HEADER),
+			),
 		};
 	} catch (error) {
 		const errorMessage = normalizeMessage(
@@ -1993,6 +2106,21 @@ proxy.all("/*", tokenAuth, async (c) => {
 		getCacheConfig(db, c.env.CACHE_VERSION_STORE),
 		getProxyRuntimeSettings(db),
 	]);
+	const retrySleepMs = Math.max(
+		0,
+		Math.floor(Number(runtimeSettings.retry_sleep_ms ?? 0)),
+	);
+	const retrySkipErrorCodeSet = buildRetryErrorCodeSet(
+		runtimeSettings.retry_skip_error_codes ?? [],
+	);
+	const retrySleepErrorCodeSet = buildRetryErrorCodeSet(
+		runtimeSettings.retry_sleep_error_codes ?? [],
+	);
+	const dispatchRetryConfig: DispatchRetryConfig = {
+		sleepMs: retrySleepMs,
+		skipErrorCodes: Array.from(retrySkipErrorCodeSet),
+		sleepErrorCodes: Array.from(retrySleepErrorCodeSet),
+	};
 	const attemptBindingPolicy: AttemptBindingPolicy = {
 		fallbackEnabled: runtimeSettings.attempt_worker_fallback_enabled,
 		fallbackThreshold: Math.max(
@@ -2616,8 +2744,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 		Math.floor(Number(runtimeSettings.retry_max_retries ?? 3)),
 	);
 	const maxAttempts = Math.min(maxRetries + 1, MAX_ATTEMPT_WORKER_INVOCATIONS);
-	const ordered = createWeightedOrder(candidates).slice(0, maxAttempts);
-	responseCandidateCount = ordered.length;
+	const ordered = buildAttemptSequence(candidates, maxAttempts);
+	responseCandidateCount = candidates.length;
 	const upstreamTimeoutMs = Math.max(
 		0,
 		Math.floor(Number(runtimeSettings.upstream_timeout_ms ?? 30000)),
@@ -2653,6 +2781,29 @@ proxy.all("/*", tokenAuth, async (c) => {
 			errorMessage: options.errorMessage,
 			latencyMs: options.latencyMs,
 		});
+	};
+	const continueAfterFailure = async (
+		errorCode: string | null,
+		errorMessage: string | null,
+		attemptNumber: number,
+	): Promise<boolean> => {
+		if (attemptNumber >= ordered.length) {
+			return false;
+		}
+		const decision = resolveRetryDecision(
+			retrySkipErrorCodeSet,
+			retrySleepErrorCodeSet,
+			retrySleepMs,
+			errorCode,
+			errorMessage,
+		);
+		if (decision.shouldSkip) {
+			return false;
+		}
+		if (decision.sleepMs > 0) {
+			await sleep(decision.sleepMs);
+		}
+		return true;
 	};
 	const responsesToolCallMismatchChannels: string[] = [];
 	const streamOptionsCapabilityMemo = new Map<
@@ -2720,6 +2871,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		streamOptionsHandled: boolean;
 	}> = [];
 	let dispatchHandled = false;
+	let dispatchStopRetry = false;
 	if (shouldTryLargeRequestDispatch) {
 		for (const channel of ordered) {
 			const attemptStart = Date.now();
@@ -2928,7 +3080,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 		if (dispatchAttempts.length > 0) {
 			const dispatchResult = await executeDispatchViaWorker(
 				c,
-				{ attempts: dispatchAttempts },
+				{
+					attempts: dispatchAttempts,
+					retryConfig: dispatchRetryConfig,
+				},
 				attemptBindingPolicy,
 				attemptBindingState,
 			);
@@ -2953,6 +3108,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			}
 			if (dispatchResult?.kind === "success") {
 				dispatchHandled = true;
+				dispatchStopRetry = dispatchResult.stopRetry;
 				const resolvedIndex = Math.min(
 					dispatchAttemptMeta.length - 1,
 					Math.max(0, dispatchResult.attemptIndex),
@@ -3251,7 +3407,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			}
 		}
 	}
-	if (dispatchHandled && !selectedResponse) {
+	if (dispatchHandled && !selectedResponse && !dispatchStopRetry) {
 		dispatchHandled = false;
 	}
 	if (!dispatchHandled) {
@@ -3513,6 +3669,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 						errorMessage: attemptResult.errorMessage,
 						latencyMs: attemptResult.latencyMs,
 					});
+					if (
+						!(await continueAfterFailure(
+							attemptResult.errorCode,
+							attemptResult.errorMessage,
+							attemptNumber,
+						))
+					) {
+						break;
+					}
 					continue;
 				}
 				let {
@@ -3591,6 +3756,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 								errorMessage: retried.errorMessage,
 								latencyMs: retried.latencyMs,
 							});
+							if (
+								!(await continueAfterFailure(
+									retried.errorCode,
+									retried.errorMessage,
+									attemptNumber,
+								))
+							) {
+								break;
+							}
 							continue;
 						}
 						response = retried.response;
@@ -3680,6 +3854,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 							errorMessage: usageMissingMessage,
 							latencyMs: attemptLatencyMs,
 						});
+						if (
+							!(await continueAfterFailure(
+								usageMissingCode,
+								usageMissingMessage,
+								attemptNumber,
+							))
+						) {
+							break;
+						}
 						continue;
 					}
 					if (
@@ -3731,6 +3914,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 							errorMessage: zeroCompletionMessage,
 							latencyMs: attemptLatencyMs,
 						});
+						if (
+							!(await continueAfterFailure(
+								USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
+								zeroCompletionMessage,
+								attemptNumber,
+							))
+						) {
+							break;
+						}
 						continue;
 					}
 
@@ -3887,6 +4079,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 						},
 					});
 				}
+				if (
+					!(await continueAfterFailure(
+						finalErrorCode,
+						normalizedErrorMessage,
+						attemptNumber,
+					))
+				) {
+					break;
+				}
 			} catch (error) {
 				const isTimeout =
 					error instanceof Error &&
@@ -3977,6 +4178,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 							nowSeconds,
 						},
 					});
+				}
+				if (
+					!(await continueAfterFailure(
+						usageErrorCode,
+						usageErrorMessage,
+						attemptNumber,
+					))
+				) {
+					break;
 				}
 			}
 		}
