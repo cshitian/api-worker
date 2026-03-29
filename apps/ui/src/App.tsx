@@ -1,4 +1,4 @@
-import "./styles.css";
+﻿import "./styles.css";
 import {
 	render,
 	useCallback,
@@ -7,8 +7,18 @@ import {
 	useRef,
 	useState,
 } from "hono/jsx/dom";
+import {
+	Button,
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "./components/ui";
 import { createApiFetch } from "./core/api";
 import {
+	initialDashboardQuery,
 	initialData,
 	initialSettingsForm,
 	initialSiteForm,
@@ -19,6 +29,7 @@ import {
 	filterSites,
 	type SiteSortState,
 	type SiteTestResult,
+	type SiteTestSummary,
 	sortSites,
 	summarizeSiteTests,
 } from "./core/sites";
@@ -26,6 +37,7 @@ import type {
 	AdminData,
 	CheckinSummary,
 	DashboardData,
+	DashboardQuery,
 	NoticeMessage,
 	NoticeTone,
 	Settings,
@@ -40,6 +52,9 @@ import type {
 	UsageResponse,
 } from "./core/types";
 import {
+	getBeijingDateString,
+	loadPageSizePref,
+	persistPageSizePref,
 	toChinaDateTimeInput,
 	toChinaIsoFromInput,
 	toggleStatus,
@@ -98,14 +113,115 @@ type ConfirmState = {
 	onConfirm: () => Promise<void> | void;
 };
 
+type SiteTestFailureItem = {
+	id: string;
+	name: string;
+	message: string;
+};
+
+type SiteTestAllReport = {
+	summary: SiteTestSummary;
+	failedSites: SiteTestFailureItem[];
+	runsAt: string;
+};
+
 const buildActionKey = (scope: string, id?: string) =>
 	id ? `${scope}:${id}` : scope;
 
 const initialUsageQuery: UsageQuery = {
-	channel: "",
-	token: "",
-	model: "",
-	status: "",
+	channel_ids: [],
+	token_ids: [],
+	models: [],
+	statuses: [],
+	from: "",
+	to: "",
+};
+
+const dashboardPresetDays: Record<DashboardQuery["preset"], number> = {
+	all: 0,
+	"7d": 7,
+	"30d": 30,
+	"90d": 90,
+	"1y": 365,
+	custom: 30,
+};
+
+const resolveDashboardRange = (query: DashboardQuery) => {
+	const today = new Date();
+	if (query.preset === "all") {
+		return { from: "", to: "", days: 0 };
+	}
+	if (query.preset !== "custom") {
+		const days = dashboardPresetDays[query.preset];
+		const fromDate = new Date(today);
+		fromDate.setDate(today.getDate() - (days - 1));
+		return {
+			from: getBeijingDateString(fromDate),
+			to: getBeijingDateString(today),
+			days,
+		};
+	}
+	const fromValue = query.from || getBeijingDateString(today);
+	const toValue = query.to || getBeijingDateString(today);
+	const fromDate = new Date(fromValue);
+	const toDate = new Date(toValue);
+	const diffDays =
+		Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())
+			? 1
+			: Math.max(
+					1,
+					Math.ceil((toDate.getTime() - fromDate.getTime()) / 86400000) + 1,
+				);
+	return { from: fromValue, to: toValue, days: diffDays };
+};
+
+const buildDashboardParams = (query: DashboardQuery) => {
+	const interval = query.interval;
+	if (query.preset === "all") {
+		const params = new URLSearchParams();
+		params.set("interval", interval);
+		params.set("limit", "366");
+		const channelIds = query.channel_ids.filter(Boolean);
+		const tokenIds = query.token_ids.filter(Boolean);
+		if (channelIds.length > 0) {
+			params.set("channel_ids", channelIds.join(","));
+		}
+		if (tokenIds.length > 0) {
+			params.set("token_ids", tokenIds.join(","));
+		}
+		if (query.model) {
+			params.set("model", query.model);
+		}
+		return { params, range: { from: "", to: "" } };
+	}
+	const { from, to, days } = resolveDashboardRange(query);
+	const limit =
+		interval === "day"
+			? days
+			: interval === "week"
+				? Math.ceil(days / 7)
+				: Math.ceil(days / 30);
+	const params = new URLSearchParams();
+	params.set("interval", interval);
+	params.set("limit", String(limit));
+	if (from) {
+		params.set("from", `${from} 00:00:00`);
+	}
+	if (to) {
+		params.set("to", `${to} 23:59:59`);
+	}
+	const channelIds = query.channel_ids.filter(Boolean);
+	const tokenIds = query.token_ids.filter(Boolean);
+	if (channelIds.length > 0) {
+		params.set("channel_ids", channelIds.join(","));
+	}
+	if (tokenIds.length > 0) {
+		params.set("token_ids", tokenIds.join(","));
+	}
+	if (query.model) {
+		params.set("model", query.model);
+	}
+	return { params, range: { from, to } };
 };
 
 /**
@@ -126,23 +242,70 @@ const App = () => {
 		return pathToTab[normalized] ?? "dashboard";
 	});
 	const [loading, setLoading] = useState(false);
-	const [notice, setNotice] = useState<NoticeMessage | null>(null);
+	const [notices, setNotices] = useState<NoticeMessage[]>([]);
 	const [data, setData] = useState<AdminData>(initialData);
+	const [dashboardQuery, setDashboardQuery] = useState<DashboardQuery>(() => {
+		if (typeof window === "undefined") {
+			return initialDashboardQuery;
+		}
+		const storedPreset = window.localStorage.getItem("dashboard:preset");
+		const storedInterval = window.localStorage.getItem("dashboard:interval");
+		const storedFrom = window.localStorage.getItem("dashboard:from") ?? "";
+		const storedTo = window.localStorage.getItem("dashboard:to") ?? "";
+		const allowedPresets: Array<DashboardQuery["preset"]> = [
+			"all",
+			"7d",
+			"30d",
+			"90d",
+			"1y",
+			"custom",
+		];
+		const preset = allowedPresets.includes(
+			storedPreset as DashboardQuery["preset"],
+		)
+			? (storedPreset as DashboardQuery["preset"])
+			: initialDashboardQuery.preset;
+		const interval =
+			storedInterval === "day" ||
+			storedInterval === "week" ||
+			storedInterval === "month"
+				? (storedInterval as DashboardQuery["interval"])
+				: initialDashboardQuery.interval;
+		if (preset === "custom") {
+			return {
+				...initialDashboardQuery,
+				preset,
+				interval,
+				from: storedFrom,
+				to: storedTo,
+			};
+		}
+		return { ...initialDashboardQuery, preset, interval, from: "", to: "" };
+	});
 	const [settingsForm, setSettingsForm] =
 		useState<SettingsForm>(initialSettingsForm);
+	const [retryErrorCodeOptions, setRetryErrorCodeOptions] = useState<string[]>(
+		[],
+	);
 	const [sitePage, setSitePage] = useState(1);
-	const [sitePageSize, setSitePageSize] = useState(10);
+	const [sitePageSize, setSitePageSize] = useState(() =>
+		loadPageSizePref("pageSize:sites", 10),
+	);
 	const [siteSearch, setSiteSearch] = useState("");
 	const [siteSort, setSiteSort] = useState<SiteSortState>({
 		key: "name",
 		direction: "asc",
 	});
 	const [tokenPage, setTokenPage] = useState(1);
-	const [tokenPageSize, setTokenPageSize] = useState(10);
+	const [tokenPageSize, setTokenPageSize] = useState(() =>
+		loadPageSizePref("pageSize:tokens", 10),
+	);
 	const [editingToken, setEditingToken] = useState<Token | null>(null);
 	const [tokenForm, setTokenForm] = useState<TokenForm>(initialTokenForm);
 	const [usagePage, setUsagePage] = useState(1);
-	const [usagePageSize, setUsagePageSize] = useState(50);
+	const [usagePageSize, setUsagePageSize] = useState(() =>
+		loadPageSizePref("pageSize:usage", 50),
+	);
 	const [usageTotal, setUsageTotal] = useState(0);
 	const [usageFilters, setUsageFilters] =
 		useState<UsageQuery>(initialUsageQuery);
@@ -157,8 +320,16 @@ const App = () => {
 		null,
 	);
 	const [checkinLastRun, setCheckinLastRun] = useState<string | null>(null);
+	const [siteTestAllReport, setSiteTestAllReport] =
+		useState<SiteTestAllReport | null>(null);
+	const [isSiteTestReportOpen, setSiteTestReportOpen] = useState(false);
 	const [, setPendingActions] = useState<Set<string>>(() => new Set());
-	const pendingActionsRef = useRef<Set<string>>(new Set());
+	const pendingActionsRef = useRef<Set<string>>(new Set()) as {
+		current: Set<string>;
+	};
+	const noticeTimersRef = useRef<Map<number, number>>(new Map()) as {
+		current: Map<number, number>;
+	};
 	const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 	const [confirmPending, setConfirmPending] = useState(false);
 
@@ -173,25 +344,52 @@ const App = () => {
 
 	const pushNotice = useCallback(
 		(tone: NoticeTone, message: string, durationMs?: number) => {
-			setNotice({ tone, message, id: Date.now(), durationMs });
+			setNotices((prev) => [
+				...prev,
+				{ tone, message, id: Date.now() + Math.random(), durationMs },
+			]);
 		},
 		[],
 	);
 
-	const dismissNotice = useCallback(() => {
-		setNotice(null);
+	const dismissNotice = useCallback((id?: number) => {
+		setNotices((prev) => {
+			if (id === undefined) {
+				return [];
+			}
+			return prev.filter((item) => item.id !== id);
+		});
 	}, []);
 
 	useEffect(() => {
-		if (!notice) {
-			return;
+		const timers = noticeTimersRef.current;
+		const activeIds = new Set(notices.map((item) => item.id));
+		for (const [id, timer] of timers) {
+			if (!activeIds.has(id)) {
+				window.clearTimeout(timer);
+				timers.delete(id);
+			}
 		}
-		const durationMs = notice.durationMs ?? 4500;
-		const timer = window.setTimeout(() => {
-			setNotice(null);
-		}, durationMs);
-		return () => window.clearTimeout(timer);
-	}, [notice]);
+		for (const notice of notices) {
+			if (timers.has(notice.id)) {
+				continue;
+			}
+			const durationMs = notice.durationMs ?? 4500;
+			const timer = window.setTimeout(() => {
+				dismissNotice(notice.id);
+			}, durationMs);
+			timers.set(notice.id, timer);
+		}
+	}, [dismissNotice, notices]);
+
+	useEffect(() => {
+		return () => {
+			for (const timer of noticeTimersRef.current.values()) {
+				window.clearTimeout(timer);
+			}
+			noticeTimersRef.current.clear();
+		};
+	}, []);
 
 	const startAction = useCallback((key: string) => {
 		if (pendingActionsRef.current.has(key)) {
@@ -220,6 +418,10 @@ const App = () => {
 			setConfirmState(null);
 		}
 	}, [confirmPending]);
+
+	const closeSiteTestReport = useCallback(() => {
+		setSiteTestReportOpen(false);
+	}, []);
 
 	const handleConfirm = useCallback(async () => {
 		if (!confirmState || confirmPending) {
@@ -255,10 +457,17 @@ const App = () => {
 		[token, updateToken],
 	);
 
-	const loadDashboard = useCallback(async () => {
-		const dashboard = await apiFetch<DashboardData>("/api/dashboard");
-		setData((prev) => ({ ...prev, dashboard }));
-	}, [apiFetch]);
+	const loadDashboard = useCallback(
+		async (override?: DashboardQuery) => {
+			const query = override ?? dashboardQuery;
+			const { params } = buildDashboardParams(query);
+			const dashboard = await apiFetch<DashboardData>(
+				`/api/dashboard?${params.toString()}`,
+			);
+			setData((prev) => ({ ...prev, dashboard }));
+		},
+		[apiFetch, dashboardQuery],
+	);
 
 	const handleDashboardRefresh = useCallback(async () => {
 		const actionKey = buildActionKey("dashboard:refresh");
@@ -275,6 +484,54 @@ const App = () => {
 			endAction(actionKey);
 		}
 	}, [endAction, isActionPending, loadDashboard, pushNotice, startAction]);
+
+	const handleDashboardQueryChange = useCallback(
+		(patch: Partial<DashboardQuery>) => {
+			setDashboardQuery((prev) => {
+				const next = { ...prev, ...patch };
+				if (typeof window !== "undefined") {
+					window.localStorage.setItem("dashboard:preset", next.preset);
+					window.localStorage.setItem("dashboard:interval", next.interval);
+					if (next.preset === "custom") {
+						window.localStorage.setItem("dashboard:from", next.from);
+						window.localStorage.setItem("dashboard:to", next.to);
+					} else {
+						window.localStorage.removeItem("dashboard:from");
+						window.localStorage.removeItem("dashboard:to");
+					}
+				}
+				return next;
+			});
+		},
+		[],
+	);
+
+	const handleDashboardApply = useCallback(
+		async (override?: DashboardQuery) => {
+			const actionKey = buildActionKey("dashboard:filter");
+			if (isActionPending(actionKey)) {
+				return;
+			}
+			const nextQuery = override ?? dashboardQuery;
+			startAction(actionKey);
+			try {
+				await loadDashboard(nextQuery);
+				pushNotice("success", "筛选已更新");
+			} catch (error) {
+				pushNotice("error", (error as Error).message);
+			} finally {
+				endAction(actionKey);
+			}
+		},
+		[
+			dashboardQuery,
+			endAction,
+			isActionPending,
+			loadDashboard,
+			pushNotice,
+			startAction,
+		],
+	);
 
 	const loadSites = useCallback(async () => {
 		const result = await apiFetch<{
@@ -314,21 +571,29 @@ const App = () => {
 			const offset = Math.max(0, (page - 1) * pageSize);
 			params.set("limit", String(pageSize));
 			params.set("offset", String(offset));
-			const channel = query.channel.trim();
-			const token = query.token.trim();
-			const model = query.model.trim();
-			const status = query.status.trim();
-			if (channel) {
-				params.set("channel", channel);
+			const channelIds = query.channel_ids.filter(Boolean);
+			const tokenIds = query.token_ids.filter(Boolean);
+			const models = query.models.filter(Boolean);
+			const statuses = query.statuses.filter(Boolean);
+			const from = query.from.trim();
+			const to = query.to.trim();
+			if (from) {
+				params.set("from", `${from} 00:00:00`);
 			}
-			if (token) {
-				params.set("token", token);
+			if (to) {
+				params.set("to", `${to} 23:59:59`);
 			}
-			if (model) {
-				params.set("model", model);
+			if (channelIds.length > 0) {
+				params.set("channel_ids", channelIds.join(","));
 			}
-			if (status) {
-				params.set("status", status);
+			if (tokenIds.length > 0) {
+				params.set("token_ids", tokenIds.join(","));
+			}
+			if (models.length > 0) {
+				params.set("models", models.join(","));
+			}
+			if (statuses.length > 0) {
+				params.set("statuses", statuses.join(","));
 			}
 			const result = await apiFetch<UsageResponse>(
 				`/api/usage?${params.toString()}`,
@@ -344,13 +609,27 @@ const App = () => {
 		setData((prev) => ({ ...prev, settings }));
 	}, [apiFetch]);
 
+	const loadRetryErrorCodes = useCallback(async () => {
+		const result = await apiFetch<{
+			items?: Array<{ error_code?: string | null }>;
+		}>("/api/usage/error-codes?limit=500");
+		const codes = Array.from(
+			new Set(
+				(result.items ?? [])
+					.map((item) => String(item.error_code ?? "").trim())
+					.filter(Boolean),
+			),
+		).sort((left, right) => left.localeCompare(right));
+		setRetryErrorCodeOptions(codes);
+	}, [apiFetch]);
+
 	const loadTab = useCallback(
 		async (tabId: TabId) => {
 			setLoading(true);
 			dismissNotice();
 			try {
 				if (tabId === "dashboard") {
-					await loadDashboard();
+					await Promise.all([loadDashboard(), loadSites(), loadTokens()]);
 				}
 				if (tabId === "channels") {
 					await loadSites();
@@ -362,10 +641,15 @@ const App = () => {
 					await Promise.all([loadTokens(), loadSites()]);
 				}
 				if (tabId === "usage") {
-					await loadUsage();
+					await Promise.all([
+						loadUsage(),
+						loadSites(),
+						loadTokens(),
+						loadModels(),
+					]);
 				}
 				if (tabId === "settings") {
-					await loadSettings();
+					await Promise.all([loadSettings(), loadRetryErrorCodes()]);
 				}
 			} catch (error) {
 				pushNotice("error", (error as Error).message);
@@ -377,6 +661,7 @@ const App = () => {
 			dismissNotice,
 			loadDashboard,
 			loadModels,
+			loadRetryErrorCodes,
 			loadSettings,
 			loadSites,
 			loadTokens,
@@ -406,13 +691,59 @@ const App = () => {
 		if (!data.settings) {
 			return;
 		}
+		const runtimeSettings =
+			data.settings.runtime_settings ?? data.settings.runtime_config;
 		setSettingsForm({
 			log_retention_days: String(data.settings.log_retention_days ?? 30),
 			session_ttl_hours: String(data.settings.session_ttl_hours ?? 12),
 			admin_password: "",
 			checkin_schedule_time: data.settings.checkin_schedule_time ?? "00:10",
-			model_failure_cooldown_minutes: String(
-				data.settings.model_failure_cooldown_minutes ?? 10,
+			proxy_model_failure_cooldown_minutes: String(
+				runtimeSettings?.model_failure_cooldown_minutes ?? 720,
+			),
+			proxy_model_failure_cooldown_threshold: String(
+				runtimeSettings?.model_failure_cooldown_threshold ?? 3,
+			),
+			proxy_model_failure_auto_disable_threshold: String(
+				runtimeSettings?.model_failure_auto_disable_threshold ?? 3,
+			),
+			proxy_upstream_timeout_ms: String(
+				runtimeSettings?.upstream_timeout_ms ?? 180000,
+			),
+			proxy_retry_max_retries: String(runtimeSettings?.retry_max_retries ?? 5),
+			proxy_retry_sleep_ms: String(runtimeSettings?.retry_sleep_ms ?? 500),
+			proxy_retry_skip_error_codes:
+				runtimeSettings?.retry_skip_error_codes ?? [],
+			proxy_retry_sleep_error_codes:
+				runtimeSettings?.retry_sleep_error_codes ?? [
+					"system_cpu_overloaded",
+					"system_disk_overloaded",
+				],
+			proxy_zero_completion_as_error_enabled:
+				runtimeSettings?.zero_completion_as_error_enabled ?? true,
+			proxy_stream_usage_mode: runtimeSettings?.stream_usage_mode ?? "full",
+			proxy_stream_usage_max_bytes: String(
+				runtimeSettings?.stream_usage_max_bytes ?? 0,
+			),
+			proxy_stream_usage_max_parsers: String(
+				runtimeSettings?.stream_usage_max_parsers ?? 0,
+			),
+			proxy_stream_usage_parse_timeout_ms: String(
+				runtimeSettings?.stream_usage_parse_timeout_ms ?? 0,
+			),
+			proxy_responses_affinity_ttl_seconds: String(
+				runtimeSettings?.responses_affinity_ttl_seconds ?? 86400,
+			),
+			proxy_stream_options_capability_ttl_seconds: String(
+				runtimeSettings?.stream_options_capability_ttl_seconds ?? 604800,
+			),
+			proxy_attempt_worker_fallback_enabled:
+				runtimeSettings?.attempt_worker_fallback_enabled ?? true,
+			proxy_attempt_worker_fallback_threshold: String(
+				runtimeSettings?.attempt_worker_fallback_threshold ?? 3,
+			),
+			proxy_large_request_offload_threshold_bytes: String(
+				runtimeSettings?.large_request_offload_threshold_bytes ?? 32768,
 			),
 		});
 	}, [data.settings]);
@@ -490,6 +821,7 @@ const App = () => {
 	}, []);
 
 	const handleSitePageSizeChange = useCallback((next: number) => {
+		persistPageSizePref("pageSize:sites", next);
 		setSitePageSize(next);
 		setSitePage(1);
 	}, []);
@@ -507,6 +839,7 @@ const App = () => {
 	}, []);
 
 	const handleTokenPageSizeChange = useCallback((next: number) => {
+		persistPageSizePref("pageSize:tokens", next);
 		setTokenPageSize(next);
 		setTokenPage(1);
 	}, []);
@@ -540,6 +873,7 @@ const App = () => {
 				return;
 			}
 			startAction(actionKey);
+			persistPageSizePref("pageSize:usage", next);
 			setUsagePageSize(next);
 			setUsagePage(1);
 			try {
@@ -563,10 +897,12 @@ const App = () => {
 			return;
 		}
 		const nextQuery = {
-			channel: usageFilters.channel.trim(),
-			token: usageFilters.token.trim(),
-			model: usageFilters.model.trim(),
-			status: usageFilters.status.trim(),
+			channel_ids: usageFilters.channel_ids.filter(Boolean),
+			token_ids: usageFilters.token_ids.filter(Boolean),
+			models: usageFilters.models.filter(Boolean),
+			statuses: usageFilters.statuses.filter((value) => /^\d+$/.test(value)),
+			from: usageFilters.from.trim(),
+			to: usageFilters.to.trim(),
 		};
 		startAction(actionKey);
 		setUsageQuery(nextQuery);
@@ -585,10 +921,12 @@ const App = () => {
 		loadUsage,
 		pushNotice,
 		startAction,
-		usageFilters.channel,
-		usageFilters.model,
-		usageFilters.status,
-		usageFilters.token,
+		usageFilters.channel_ids,
+		usageFilters.from,
+		usageFilters.models,
+		usageFilters.statuses,
+		usageFilters.token_ids,
+		usageFilters.to,
 	]);
 
 	const handleUsageClear = useCallback(async () => {
@@ -759,8 +1097,11 @@ const App = () => {
 			return;
 		}
 		startAction(actionKey);
+		setSiteTestAllReport(null);
+		setSiteTestReportOpen(false);
 		pushNotice("info", "正在执行一键测试...");
 		const results: SiteTestResult[] = [];
+		const failedSites: SiteTestFailureItem[] = [];
 		try {
 			for (const site of data.sites) {
 				if (site.status !== "active") {
@@ -772,8 +1113,13 @@ const App = () => {
 						method: "POST",
 					});
 					results.push({ status: "success" });
-				} catch (_error) {
+				} catch (error) {
 					results.push({ status: "failed" });
+					failedSites.push({
+						id: site.id,
+						name: site.name || site.id,
+						message: (error as Error).message || "测试失败",
+					});
 				}
 			}
 			await loadSites();
@@ -786,12 +1132,21 @@ const App = () => {
 				);
 				return;
 			}
+			setSiteTestAllReport({
+				summary,
+				failedSites,
+				runsAt: new Date().toISOString(),
+			});
 			let message =
 				summary.failed > 0
 					? `一键测试完成，成功 ${summary.success}/${testedTotal}，失败 ${summary.failed}。`
 					: `一键测试完成，成功 ${summary.success}/${testedTotal}。`;
 			if (summary.skipped > 0) {
 				message += ` 已跳过 ${summary.skipped} 个禁用站点。`;
+			}
+			if (failedSites.length > 0) {
+				setSiteTestReportOpen(true);
+				message += " 已生成失败清单。";
 			}
 			pushNotice(summary.failed > 0 ? "warning" : "success", message);
 		} finally {
@@ -1008,7 +1363,53 @@ const App = () => {
 			const retention = Number(settingsForm.log_retention_days);
 			const sessionTtlHours = Number(settingsForm.session_ttl_hours);
 			const failureCooldownMinutes = Number(
-				settingsForm.model_failure_cooldown_minutes,
+				settingsForm.proxy_model_failure_cooldown_minutes,
+			);
+			const failureCooldownThreshold = Number(
+				settingsForm.proxy_model_failure_cooldown_threshold,
+			);
+			const failureAutoDisableThreshold = Number(
+				settingsForm.proxy_model_failure_auto_disable_threshold,
+			);
+			const upstreamTimeoutMs = Number(settingsForm.proxy_upstream_timeout_ms);
+			const retryMaxRetries = Number(settingsForm.proxy_retry_max_retries);
+			const retrySleepMs = Number(settingsForm.proxy_retry_sleep_ms);
+			const normalizeErrorCodeList = (value: string[]): string[] => {
+				return Array.from(
+					new Set(
+						value.map((item) => String(item ?? "").trim()).filter(Boolean),
+					),
+				);
+			};
+			const retrySkipErrorCodes = normalizeErrorCodeList(
+				settingsForm.proxy_retry_skip_error_codes,
+			);
+			const retrySleepErrorCodes = normalizeErrorCodeList(
+				settingsForm.proxy_retry_sleep_error_codes,
+			);
+			const streamUsageMode = settingsForm.proxy_stream_usage_mode
+				.trim()
+				.toLowerCase();
+			const streamUsageMaxBytes = Number(
+				settingsForm.proxy_stream_usage_max_bytes,
+			);
+			const streamUsageMaxParsers = Number(
+				settingsForm.proxy_stream_usage_max_parsers,
+			);
+			const streamUsageParseTimeoutMs = Number(
+				settingsForm.proxy_stream_usage_parse_timeout_ms,
+			);
+			const responsesAffinityTtlSeconds = Number(
+				settingsForm.proxy_responses_affinity_ttl_seconds,
+			);
+			const streamOptionsCapabilityTtlSeconds = Number(
+				settingsForm.proxy_stream_options_capability_ttl_seconds,
+			);
+			const attemptWorkerFallbackThreshold = Number(
+				settingsForm.proxy_attempt_worker_fallback_threshold,
+			);
+			const largeRequestOffloadThresholdBytes = Number(
+				settingsForm.proxy_large_request_offload_threshold_bytes,
 			);
 			if (
 				Number.isNaN(retention) ||
@@ -1016,20 +1417,128 @@ const App = () => {
 				Number.isNaN(sessionTtlHours) ||
 				sessionTtlHours < 1
 			) {
-				pushNotice("warning", "请填写有效的保留天数与会话时长");
+				pushNotice("warning", "请填写有效的日志保留天数与会话时长");
 				return;
 			}
-			if (Number.isNaN(failureCooldownMinutes) || failureCooldownMinutes < 1) {
-				pushNotice("warning", "失败冷却需为正整数");
+			if (Number.isNaN(failureCooldownMinutes) || failureCooldownMinutes < 0) {
+				pushNotice("warning", "失败冷却时长需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(failureCooldownThreshold) ||
+				failureCooldownThreshold < 1 ||
+				!Number.isInteger(failureCooldownThreshold)
+			) {
+				pushNotice("warning", "连续失败次数阈值需为正整数");
+				return;
+			}
+			if (
+				Number.isNaN(failureAutoDisableThreshold) ||
+				failureAutoDisableThreshold < 1 ||
+				!Number.isInteger(failureAutoDisableThreshold)
+			) {
+				pushNotice("warning", "自动禁用阈值（按冷却次数）需为正整数");
+				return;
+			}
+			if (Number.isNaN(upstreamTimeoutMs) || upstreamTimeoutMs < 0) {
+				pushNotice("warning", "上游超时需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(retryMaxRetries) ||
+				retryMaxRetries < 0 ||
+				!Number.isInteger(retryMaxRetries)
+			) {
+				pushNotice("warning", "重发次数需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(retrySleepMs) ||
+				retrySleepMs < 0 ||
+				!Number.isInteger(retrySleepMs)
+			) {
+				pushNotice("warning", "统一等待时间需为非负整数");
+				return;
+			}
+			if (!["full", "lite", "off"].includes(streamUsageMode)) {
+				pushNotice("warning", "流式解析模式需为 full/lite/off");
+				return;
+			}
+			if (Number.isNaN(streamUsageMaxBytes) || streamUsageMaxBytes < 0) {
+				pushNotice("warning", "最大字节数需为非负整数");
+				return;
+			}
+			if (Number.isNaN(streamUsageMaxParsers) || streamUsageMaxParsers < 0) {
+				pushNotice("warning", "并发上限需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(streamUsageParseTimeoutMs) ||
+				streamUsageParseTimeoutMs < 0
+			) {
+				pushNotice("warning", "解析参数需为非负整数");
+				return;
+			}
+			if (
+				Number.isNaN(responsesAffinityTtlSeconds) ||
+				responsesAffinityTtlSeconds < 60 ||
+				!Number.isInteger(responsesAffinityTtlSeconds)
+			) {
+				pushNotice("warning", "Responses 粘滞 TTL 需为不小于 60 的整数");
+				return;
+			}
+			if (
+				Number.isNaN(streamOptionsCapabilityTtlSeconds) ||
+				streamOptionsCapabilityTtlSeconds < 60 ||
+				!Number.isInteger(streamOptionsCapabilityTtlSeconds)
+			) {
+				pushNotice("warning", "stream_options 能力 TTL 需为不小于 60 的整数");
+				return;
+			}
+			if (
+				Number.isNaN(attemptWorkerFallbackThreshold) ||
+				attemptWorkerFallbackThreshold < 1 ||
+				!Number.isInteger(attemptWorkerFallbackThreshold)
+			) {
+				pushNotice("warning", "调用执行器异常阈值需为正整数");
+				return;
+			}
+			if (
+				Number.isNaN(largeRequestOffloadThresholdBytes) ||
+				largeRequestOffloadThresholdBytes < 0 ||
+				!Number.isInteger(largeRequestOffloadThresholdBytes)
+			) {
+				pushNotice("warning", "大请求下沉阈值需为非负整数");
 				return;
 			}
 			startAction(actionKey);
-			const payload: Record<string, number | string | boolean> = {
+			const payload: Record<string, unknown> = {
 				log_retention_days: retention,
 				session_ttl_hours: sessionTtlHours,
 				checkin_schedule_time:
 					settingsForm.checkin_schedule_time.trim() || "00:10",
-				model_failure_cooldown_minutes: failureCooldownMinutes,
+				proxy_model_failure_cooldown_minutes: failureCooldownMinutes,
+				proxy_model_failure_cooldown_threshold: failureCooldownThreshold,
+				proxy_model_failure_auto_disable_threshold: failureAutoDisableThreshold,
+				proxy_upstream_timeout_ms: upstreamTimeoutMs,
+				proxy_retry_max_retries: retryMaxRetries,
+				proxy_retry_sleep_ms: retrySleepMs,
+				proxy_retry_skip_error_codes: retrySkipErrorCodes,
+				proxy_retry_sleep_error_codes: retrySleepErrorCodes,
+				proxy_zero_completion_as_error_enabled:
+					settingsForm.proxy_zero_completion_as_error_enabled,
+				proxy_stream_usage_mode: streamUsageMode,
+				proxy_stream_usage_max_bytes: streamUsageMaxBytes,
+				proxy_stream_usage_max_parsers: streamUsageMaxParsers,
+				proxy_stream_usage_parse_timeout_ms: streamUsageParseTimeoutMs,
+				proxy_responses_affinity_ttl_seconds: responsesAffinityTtlSeconds,
+				proxy_stream_options_capability_ttl_seconds:
+					streamOptionsCapabilityTtlSeconds,
+				proxy_attempt_worker_fallback_enabled:
+					settingsForm.proxy_attempt_worker_fallback_enabled,
+				proxy_attempt_worker_fallback_threshold: attemptWorkerFallbackThreshold,
+				proxy_large_request_offload_threshold_bytes:
+					largeRequestOffloadThresholdBytes,
 			};
 			const password = settingsForm.admin_password.trim();
 			if (password) {
@@ -1040,7 +1549,7 @@ const App = () => {
 					method: "PUT",
 					body: JSON.stringify(payload),
 				});
-				await loadSettings();
+				await Promise.all([loadSettings(), loadRetryErrorCodes()]);
 				setSettingsForm((prev) => ({ ...prev, admin_password: "" }));
 				pushNotice("success", "设置已更新");
 			} catch (error) {
@@ -1053,6 +1562,7 @@ const App = () => {
 			apiFetch,
 			endAction,
 			isActionPending,
+			loadRetryErrorCodes,
 			loadSettings,
 			pushNotice,
 			settingsForm,
@@ -1128,6 +1638,125 @@ const App = () => {
 		},
 		[endAction, isActionPending, loadSites, pushNotice, startAction, apiFetch],
 	);
+
+	const handleDisableFailedSite = useCallback(
+		async (site: SiteTestFailureItem) => {
+			const actionKey = buildActionKey("site:disableFailed", site.id);
+			if (isActionPending(actionKey)) {
+				return;
+			}
+			startAction(actionKey);
+			try {
+				await apiFetch(`/api/sites/${site.id}`, {
+					method: "PATCH",
+					body: JSON.stringify({ status: "disabled" }),
+				});
+				await loadSites();
+				setSiteTestAllReport((prev) => {
+					if (!prev) {
+						return prev;
+					}
+					return {
+						...prev,
+						failedSites: prev.failedSites.filter((item) => item.id !== site.id),
+					};
+				});
+				pushNotice("success", `已禁用失败站点：${site.name}`);
+			} catch (error) {
+				pushNotice("error", (error as Error).message);
+			} finally {
+				endAction(actionKey);
+			}
+		},
+		[endAction, isActionPending, loadSites, pushNotice, startAction, apiFetch],
+	);
+
+	const handleDisableAllFailedSites = useCallback(async () => {
+		const report = siteTestAllReport;
+		if (!report || report.failedSites.length === 0) {
+			pushNotice("info", "当前没有可禁用的失败站点");
+			return;
+		}
+		const actionKey = buildActionKey("site:disableFailedAll");
+		if (isActionPending(actionKey)) {
+			return;
+		}
+		startAction(actionKey);
+		try {
+			const settled = await Promise.allSettled(
+				report.failedSites.map(async (item) => {
+					await apiFetch(`/api/sites/${item.id}`, {
+						method: "PATCH",
+						body: JSON.stringify({ status: "disabled" }),
+					});
+					return item.id;
+				}),
+			);
+			const successIds = settled
+				.filter(
+					(item): item is PromiseFulfilledResult<string> =>
+						item.status === "fulfilled",
+				)
+				.map((item) => item.value);
+			const failedCount = settled.length - successIds.length;
+			await loadSites();
+			setSiteTestAllReport((prev) => {
+				if (!prev || successIds.length === 0) {
+					return prev;
+				}
+				const successSet = new Set(successIds);
+				return {
+					...prev,
+					failedSites: prev.failedSites.filter(
+						(item) => !successSet.has(item.id),
+					),
+				};
+			});
+			if (failedCount > 0) {
+				pushNotice(
+					"warning",
+					`批量禁用完成，成功 ${successIds.length} 个，失败 ${failedCount} 个。`,
+				);
+			} else {
+				pushNotice("success", `已批量禁用 ${successIds.length} 个失败站点。`);
+			}
+		} catch (error) {
+			pushNotice("error", (error as Error).message);
+		} finally {
+			endAction(actionKey);
+		}
+	}, [
+		apiFetch,
+		endAction,
+		isActionPending,
+		loadSites,
+		pushNotice,
+		siteTestAllReport,
+		startAction,
+	]);
+
+	const requestDisableAllFailedSites = useCallback(() => {
+		const report = siteTestAllReport;
+		if (!report || report.failedSites.length === 0) {
+			pushNotice("info", "当前没有可禁用的失败站点");
+			return;
+		}
+		const names = report.failedSites
+			.slice(0, 5)
+			.map((item) => item.name)
+			.join("、");
+		const suffix =
+			report.failedSites.length > 5
+				? ` 等 ${report.failedSites.length} 个站点`
+				: "";
+		openConfirm({
+			title: "批量禁用失败站点",
+			message: `将禁用以下测试失败站点：${names}${suffix}。确认继续吗？`,
+			confirmLabel: "禁用全部失败站点",
+			tone: "error",
+			onConfirm: () => handleDisableAllFailedSites(),
+		});
+	}, [handleDisableAllFailedSites, openConfirm, pushNotice, siteTestAllReport]);
 
 	const handleTokenDelete = useCallback(
 		async (id: string) => {
@@ -1214,6 +1843,44 @@ const App = () => {
 			}
 		},
 		[endAction, isActionPending, loadTokens, pushNotice, startAction, apiFetch],
+	);
+
+	const handleCheckinRunSite = useCallback(
+		async (site: Site) => {
+			const actionKey = buildActionKey("site:checkin", site.id);
+			if (isActionPending(actionKey)) {
+				return;
+			}
+			startAction(actionKey);
+			try {
+				const result = await apiFetch<{
+					result: {
+						id: string;
+						name: string;
+						status: "success" | "failed" | "skipped";
+						message: string;
+						checkin_date?: string | null;
+					};
+					runs_at: string;
+				}>(`/api/sites/${site.id}/checkin`, { method: "POST" });
+				await loadSites();
+				const tone =
+					result.result.status === "failed"
+						? "warning"
+						: result.result.status === "skipped"
+							? "info"
+							: "success";
+				pushNotice(
+					tone,
+					`${site.name || "站点"}：${result.result.message || "签到完成"}`,
+				);
+			} catch (error) {
+				pushNotice("error", (error as Error).message);
+			} finally {
+				endAction(actionKey);
+			}
+		},
+		[endAction, isActionPending, loadSites, pushNotice, startAction, apiFetch],
 	);
 
 	const handleCheckinRunAll = useCallback(async () => {
@@ -1326,6 +1993,7 @@ const App = () => {
 		() => tabs.find((tab) => tab.id === activeTab)?.label ?? "管理台",
 		[activeTab],
 	);
+	const loginNotice = notices[notices.length - 1] ?? null;
 
 	const renderContent = () => {
 		if (loading) {
@@ -1347,7 +2015,15 @@ const App = () => {
 			return (
 				<DashboardView
 					dashboard={data.dashboard}
-					isRefreshing={isActionPending(buildActionKey("dashboard:refresh"))}
+					isRefreshing={
+						isActionPending(buildActionKey("dashboard:refresh")) ||
+						isActionPending(buildActionKey("dashboard:filter"))
+					}
+					query={dashboardQuery}
+					channels={data.sites}
+					tokens={data.tokens}
+					onQueryChange={handleDashboardQueryChange}
+					onApply={handleDashboardApply}
 					onRefresh={handleDashboardRefresh}
 				/>
 			);
@@ -1373,6 +2049,7 @@ const App = () => {
 					onEdit={startSiteEdit}
 					onSubmit={handleSiteSubmit}
 					onTest={handleSiteTest}
+					onCheckin={handleCheckinRunSite}
 					onToggle={handleSiteToggle}
 					onDelete={requestSiteDelete}
 					onPageChange={handleSitePageChange}
@@ -1382,6 +2059,8 @@ const App = () => {
 					onFormChange={handleSiteFormChange}
 					onRunAll={handleCheckinRunAll}
 					onTestAll={handleSiteTestAll}
+					testFailureCount={siteTestAllReport?.failedSites.length ?? 0}
+					onOpenTestFailures={() => setSiteTestReportOpen(true)}
 				/>
 			);
 		}
@@ -1426,6 +2105,9 @@ const App = () => {
 						isActionPending(buildActionKey("usage:refresh")) ||
 						isActionPending(buildActionKey("usage:load"))
 					}
+					sites={data.sites}
+					tokens={data.tokens}
+					models={data.models}
 					onRefresh={handleUsageRefresh}
 					onPageChange={handleUsagePageChange}
 					onPageSizeChange={handleUsagePageSizeChange}
@@ -1440,6 +2122,8 @@ const App = () => {
 				<SettingsView
 					settingsForm={settingsForm}
 					adminPasswordSet={data.settings?.admin_password_set ?? false}
+					runtimeConfig={data.settings?.runtime_config ?? null}
+					retryErrorCodeOptions={retryErrorCodeOptions}
 					isSaving={isActionPending(buildActionKey("settings:submit"))}
 					onSubmit={handleSettingsSubmit}
 					onFormChange={handleSettingsFormChange}
@@ -1458,7 +2142,7 @@ const App = () => {
 					activeTab={activeTab}
 					activeLabel={activeLabel}
 					token={token}
-					notice={notice}
+					notices={notices}
 					onDismissNotice={dismissNotice}
 					onTabChange={handleTabChange}
 					onLogout={handleLogout}
@@ -1468,68 +2152,147 @@ const App = () => {
 			) : (
 				<LoginView
 					isSubmitting={isActionPending(buildActionKey("login:submit"))}
-					notice={notice}
+					notice={loginNotice}
 					onSubmit={handleLogin}
 				/>
 			)}
-			{confirmState && (
-				<div class="fixed inset-0 z-50">
-					<button
-						aria-label="关闭弹窗"
-						class="absolute inset-0 bg-slate-950/40"
-						type="button"
-						onClick={closeConfirm}
-					/>
-					<div class="relative z-10 flex min-h-screen items-center justify-center px-4 py-8">
-						<div
-							aria-labelledby="confirm-title"
-							aria-modal="true"
-							class="app-card w-full max-w-md p-6"
-							role="dialog"
-						>
-							<div class="flex items-start justify-between gap-4">
-								<div>
-									<h3 class="app-title text-lg" id="confirm-title">
-										{confirmState.title}
-									</h3>
-									<p class="mt-2 text-sm text-[color:var(--app-ink-muted)]">
-										{confirmState.message}
-									</p>
+			{siteTestAllReport && (
+				<Dialog open={isSiteTestReportOpen} onClose={closeSiteTestReport}>
+					<DialogContent
+						aria-labelledby="site-test-report-title"
+						aria-modal="true"
+						class="max-w-4xl"
+					>
+						<DialogHeader>
+							<div>
+								<DialogTitle id="site-test-report-title">
+									一键测试失败清单
+								</DialogTitle>
+								<DialogDescription>
+									最近测试：
+									{new Date(siteTestAllReport.runsAt).toLocaleString("zh-CN", {
+										hour12: false,
+									})}
+									。成功 {siteTestAllReport.summary.success} / 失败{" "}
+									{siteTestAllReport.summary.failed} / 跳过{" "}
+									{siteTestAllReport.summary.skipped}
+								</DialogDescription>
+							</div>
+							<Button size="sm" type="button" onClick={closeSiteTestReport}>
+								关闭
+							</Button>
+						</DialogHeader>
+						<div class="mt-3 max-h-[55vh] space-y-3 overflow-y-auto">
+							{siteTestAllReport.failedSites.length === 0 ? (
+								<div class="rounded-xl border border-white/60 bg-white/70 px-4 py-4 text-sm text-[color:var(--app-ink-muted)]">
+									失败站点已处理完毕。
 								</div>
-								<button
-									class="app-button app-focus"
-									type="button"
-									onClick={closeConfirm}
-								>
-									关闭
-								</button>
-							</div>
-							<div class="mt-6 flex flex-wrap items-center justify-end gap-2">
-								<button
-									class="app-button app-focus"
-									type="button"
-									onClick={closeConfirm}
-								>
-									取消
-								</button>
-								<button
-									class={`app-button app-focus ${
-										confirmState.tone === "error"
-											? "app-button-danger"
-											: "app-button-primary"
-									}`}
-									type="button"
-									disabled={confirmPending}
-									onClick={handleConfirm}
-								>
-									{confirmPending
-										? "处理中..."
-										: (confirmState.confirmLabel ?? "确认")}
-								</button>
-							</div>
+							) : (
+								<div class="space-y-2">
+									{siteTestAllReport.failedSites.map((item) => (
+										<div
+											class="grid gap-3 rounded-xl border border-white/60 bg-white/80 px-4 py-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1.8fr)_auto]"
+											key={item.id}
+										>
+											<div class="min-w-0">
+												<p class="truncate text-sm font-semibold text-[color:var(--app-ink)]">
+													{item.name}
+												</p>
+												<p class="truncate text-[11px] text-[color:var(--app-ink-muted)]">
+													ID: {item.id}
+												</p>
+											</div>
+											<p class="text-xs text-[color:var(--app-danger)]">
+												{item.message}
+											</p>
+											<div class="flex flex-wrap items-center justify-end gap-2">
+												<Button
+													size="sm"
+													type="button"
+													class="h-8 px-3 text-xs"
+													disabled={isActionPending(
+														buildActionKey("site:test", item.id),
+													)}
+													onClick={() => handleSiteTest(item.id)}
+												>
+													重测
+												</Button>
+												<Button
+													size="sm"
+													type="button"
+													variant="danger"
+													class="h-8 px-3 text-xs"
+													disabled={isActionPending(
+														buildActionKey("site:disableFailed", item.id),
+													)}
+													onClick={() => handleDisableFailedSite(item)}
+												>
+													禁用
+												</Button>
+											</div>
+										</div>
+									))}
+								</div>
+							)}
 						</div>
-					</div>
-				</div>
+						<DialogFooter>
+							<Button size="sm" type="button" onClick={closeSiteTestReport}>
+								关闭
+							</Button>
+							<Button
+								size="sm"
+								type="button"
+								variant="danger"
+								disabled={
+									siteTestAllReport.failedSites.length === 0 ||
+									isActionPending(buildActionKey("site:disableFailedAll"))
+								}
+								onClick={requestDisableAllFailedSites}
+							>
+								{isActionPending(buildActionKey("site:disableFailedAll"))
+									? "禁用中..."
+									: "禁用全部失败站点"}
+							</Button>
+						</DialogFooter>
+					</DialogContent>
+				</Dialog>
+			)}
+			{confirmState && (
+				<Dialog open={Boolean(confirmState)} onClose={closeConfirm}>
+					<DialogContent
+						aria-labelledby="confirm-title"
+						aria-modal="true"
+						class="max-w-md"
+					>
+						<DialogHeader>
+							<div>
+								<DialogTitle id="confirm-title">
+									{confirmState.title}
+								</DialogTitle>
+								<DialogDescription>{confirmState.message}</DialogDescription>
+							</div>
+							<Button size="sm" type="button" onClick={closeConfirm}>
+								关闭
+							</Button>
+						</DialogHeader>
+						<DialogFooter>
+							<Button size="sm" type="button" onClick={closeConfirm}>
+								取消
+							</Button>
+							<Button
+								size="sm"
+								variant={confirmState.tone === "error" ? "danger" : "primary"}
+								type="button"
+								disabled={confirmPending}
+								onClick={handleConfirm}
+							>
+								{confirmPending
+									? "处理中..."
+									: (confirmState.confirmLabel ?? "确认")}
+							</Button>
+						</DialogFooter>
+					</DialogContent>
+				</Dialog>
 			)}
 		</div>
 	);

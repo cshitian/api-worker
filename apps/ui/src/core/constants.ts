@@ -1,5 +1,6 @@
 import type {
 	AdminData,
+	DashboardQuery,
 	SettingsForm,
 	SiteForm,
 	TabItem,
@@ -49,7 +50,37 @@ export const initialSettingsForm: SettingsForm = {
 	session_ttl_hours: "12",
 	admin_password: "",
 	checkin_schedule_time: "00:10",
-	model_failure_cooldown_minutes: "10",
+	proxy_model_failure_cooldown_minutes: "720",
+	proxy_model_failure_cooldown_threshold: "3",
+	proxy_model_failure_auto_disable_threshold: "3",
+	proxy_upstream_timeout_ms: "180000",
+	proxy_retry_max_retries: "5",
+	proxy_retry_sleep_ms: "500",
+	proxy_retry_skip_error_codes: [],
+	proxy_retry_sleep_error_codes: [
+		"system_cpu_overloaded",
+		"system_disk_overloaded",
+	],
+	proxy_zero_completion_as_error_enabled: true,
+	proxy_stream_usage_mode: "full",
+	proxy_stream_usage_max_bytes: "0",
+	proxy_stream_usage_max_parsers: "0",
+	proxy_stream_usage_parse_timeout_ms: "0",
+	proxy_responses_affinity_ttl_seconds: "86400",
+	proxy_stream_options_capability_ttl_seconds: "604800",
+	proxy_attempt_worker_fallback_enabled: true,
+	proxy_attempt_worker_fallback_threshold: "3",
+	proxy_large_request_offload_threshold_bytes: "32768",
+};
+
+export const initialDashboardQuery: DashboardQuery = {
+	preset: "all",
+	interval: "month",
+	from: "",
+	to: "",
+	channel_ids: [],
+	token_ids: [],
+	model: "",
 };
 
 export const initialTokenForm: TokenForm = {

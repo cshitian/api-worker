@@ -65,14 +65,20 @@ export type UsageLog = {
 	upstream_status?: number | null;
 	error_code?: string | null;
 	error_message?: string | null;
+	failure_stage?: string | null;
+	failure_reason?: string | null;
+	usage_source?: string | null;
+	error_meta_json?: string | null;
 	created_at: string;
 };
 
 export type UsageQuery = {
-	channel: string;
-	token: string;
-	model: string;
-	status: string;
+	channel_ids: string[];
+	token_ids: string[];
+	models: string[];
+	statuses: string[];
+	from: string;
+	to: string;
 };
 
 export type UsageResponse = {
@@ -89,10 +95,29 @@ export type DashboardData = {
 		avg_latency: number;
 		total_errors: number;
 	};
-	byDay: Array<{ day: string; requests: number; tokens: number }>;
+	interval: "day" | "week" | "month";
+	trend: Array<{ bucket: string; requests: number; tokens: number }>;
 	byModel: Array<{ model: string; requests: number; tokens: number }>;
 	byChannel: Array<{ channel_name: string; requests: number; tokens: number }>;
 	byToken: Array<{ token_name: string; requests: number; tokens: number }>;
+};
+
+export type DashboardRangePreset =
+	| "all"
+	| "7d"
+	| "30d"
+	| "90d"
+	| "1y"
+	| "custom";
+
+export type DashboardQuery = {
+	preset: DashboardRangePreset;
+	interval: "day" | "week" | "month";
+	from: string;
+	to: string;
+	channel_ids: string[];
+	token_ids: string[];
+	model: string;
 };
 
 export type Settings = {
@@ -100,7 +125,37 @@ export type Settings = {
 	session_ttl_hours: number;
 	admin_password_set?: boolean;
 	checkin_schedule_time?: string;
-	model_failure_cooldown_minutes?: number;
+	proxy_model_failure_cooldown_minutes?: number;
+	proxy_model_failure_cooldown_threshold?: number;
+	proxy_model_failure_auto_disable_threshold?: number;
+	runtime_settings?: RuntimeProxySettings;
+	runtime_config?: RuntimeProxyConfig;
+};
+
+export type RuntimeProxySettings = {
+	upstream_timeout_ms: number;
+	retry_max_retries: number;
+	retry_sleep_ms: number;
+	retry_skip_error_codes: string[];
+	retry_sleep_error_codes: string[];
+	zero_completion_as_error_enabled: boolean;
+	model_failure_cooldown_minutes: number;
+	model_failure_cooldown_threshold: number;
+	model_failure_auto_disable_threshold: number;
+	stream_usage_mode: string;
+	stream_usage_max_bytes: number;
+	stream_usage_max_parsers: number;
+	stream_usage_parse_timeout_ms: number;
+	responses_affinity_ttl_seconds: number;
+	stream_options_capability_ttl_seconds: number;
+	attempt_worker_fallback_enabled: boolean;
+	attempt_worker_fallback_threshold: number;
+	large_request_offload_threshold_bytes: number;
+};
+
+export type RuntimeProxyConfig = RuntimeProxySettings & {
+	attempt_worker_bound: boolean;
+	attempt_worker_fallback_active: boolean;
 };
 
 export type ModelChannel = {
@@ -159,7 +214,24 @@ export type SettingsForm = {
 	session_ttl_hours: string;
 	admin_password: string;
 	checkin_schedule_time: string;
-	model_failure_cooldown_minutes: string;
+	proxy_model_failure_cooldown_minutes: string;
+	proxy_model_failure_cooldown_threshold: string;
+	proxy_model_failure_auto_disable_threshold: string;
+	proxy_upstream_timeout_ms: string;
+	proxy_retry_max_retries: string;
+	proxy_retry_sleep_ms: string;
+	proxy_retry_skip_error_codes: string[];
+	proxy_retry_sleep_error_codes: string[];
+	proxy_zero_completion_as_error_enabled: boolean;
+	proxy_stream_usage_mode: string;
+	proxy_stream_usage_max_bytes: string;
+	proxy_stream_usage_max_parsers: string;
+	proxy_stream_usage_parse_timeout_ms: string;
+	proxy_responses_affinity_ttl_seconds: string;
+	proxy_stream_options_capability_ttl_seconds: string;
+	proxy_attempt_worker_fallback_enabled: boolean;
+	proxy_attempt_worker_fallback_threshold: string;
+	proxy_large_request_offload_threshold_bytes: string;
 };
 
 export type TokenForm = {

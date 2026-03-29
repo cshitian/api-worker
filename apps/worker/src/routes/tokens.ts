@@ -19,9 +19,7 @@ type TokenRow = {
 	expires_at?: string | null;
 };
 
-const normalizeAllowedChannels = (
-	raw: string | null,
-): string[] | null => {
+const normalizeAllowedChannels = (raw: string | null): string[] | null => {
 	if (!raw) {
 		return null;
 	}
@@ -61,7 +59,7 @@ const normalizeExpiresAt = (
 tokens.get("/", async (c) => {
 	const result = await c.env.DB.prepare(
 		"SELECT id, name, key_prefix, quota_total, quota_used, status, allowed_channels, expires_at, created_at, updated_at FROM tokens ORDER BY created_at DESC",
-	).all();
+	).all<TokenRow>();
 	const tokens = (result.results ?? []).map((row) => ({
 		...row,
 		allowed_channels: normalizeAllowedChannels(row.allowed_channels ?? null),

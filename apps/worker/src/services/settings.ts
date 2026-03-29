@@ -1,15 +1,148 @@
 import type { D1Database } from "@cloudflare/workers-types";
+import type { Bindings } from "../env";
 import { nowIso } from "../utils/time";
 
 const DEFAULT_LOG_RETENTION_DAYS = 30;
 const DEFAULT_SESSION_TTL_HOURS = 12;
 const DEFAULT_CHECKIN_SCHEDULE_TIME = "00:10";
-const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 10;
+const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 720;
+const DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD = 3;
+const DEFAULT_MODEL_FAILURE_AUTO_DISABLE_THRESHOLD = 3;
+const DEFAULT_PROXY_STREAM_USAGE_MODE = "full";
+const DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES = 0;
+const DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS = 0;
+const DEFAULT_PROXY_STREAM_USAGE_PARSE_TIMEOUT_MS = 0;
+const DEFAULT_PROXY_RESPONSES_AFFINITY_TTL_SECONDS = 24 * 60 * 60;
+const DEFAULT_PROXY_STREAM_OPTIONS_CAPABILITY_TTL_SECONDS = 7 * 24 * 60 * 60;
+const DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS = 180000;
+const DEFAULT_PROXY_RETRY_MAX_RETRIES = 5;
+const DEFAULT_PROXY_RETRY_SLEEP_MS = 500;
+const DEFAULT_PROXY_RETRY_SKIP_ERROR_CODES: string[] = [];
+const DEFAULT_PROXY_RETRY_SLEEP_ERROR_CODES = [
+	"system_cpu_overloaded",
+	"system_disk_overloaded",
+];
+const DEFAULT_PROXY_ZERO_COMPLETION_AS_ERROR_ENABLED = true;
+const DEFAULT_PROXY_ATTEMPT_WORKER_FALLBACK_ENABLED = true;
+const DEFAULT_PROXY_ATTEMPT_WORKER_FALLBACK_THRESHOLD = 3;
+const DEFAULT_PROXY_LARGE_REQUEST_OFFLOAD_THRESHOLD_BYTES = 32768;
+const DEFAULT_ATTEMPT_LOG_ENABLED = true;
+const DEFAULT_ATTEMPT_LOG_RETENTION_DAYS = 30;
+const SETTING_SNAPSHOT_TTL_MS = 1000;
+const RUNTIME_SETTING_SNAPSHOT_TTL_MS = 5000;
+
 const RETENTION_KEY = "log_retention_days";
 const SESSION_TTL_KEY = "session_ttl_hours";
 const ADMIN_PASSWORD_HASH_KEY = "admin_password_hash";
 const CHECKIN_SCHEDULE_TIME_KEY = "checkin_schedule_time";
 const MODEL_FAILURE_COOLDOWN_KEY = "model_failure_cooldown_minutes";
+const MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY = "model_failure_cooldown_threshold";
+const MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY =
+	"model_failure_auto_disable_threshold";
+const PROXY_UPSTREAM_TIMEOUT_KEY = "proxy_upstream_timeout_ms";
+const PROXY_RETRY_MAX_RETRIES_KEY = "proxy_retry_max_retries";
+const PROXY_RETRY_SLEEP_MS_KEY = "proxy_retry_sleep_ms";
+const PROXY_RETRY_SKIP_ERROR_CODES_KEY = "proxy_retry_skip_error_codes";
+const PROXY_RETRY_SLEEP_ERROR_CODES_KEY = "proxy_retry_sleep_error_codes";
+const PROXY_ZERO_COMPLETION_AS_ERROR_KEY =
+	"proxy_zero_completion_as_error_enabled";
+const PROXY_STREAM_USAGE_MODE_KEY = "proxy_stream_usage_mode";
+const PROXY_STREAM_USAGE_MAX_BYTES_KEY = "proxy_stream_usage_max_bytes";
+const PROXY_STREAM_USAGE_MAX_PARSERS_KEY = "proxy_stream_usage_max_parsers";
+const PROXY_STREAM_USAGE_PARSE_TIMEOUT_KEY =
+	"proxy_stream_usage_parse_timeout_ms";
+const PROXY_RESPONSES_AFFINITY_TTL_KEY = "proxy_responses_affinity_ttl_seconds";
+const PROXY_STREAM_OPTIONS_CAPABILITY_TTL_KEY =
+	"proxy_stream_options_capability_ttl_seconds";
+const PROXY_ATTEMPT_WORKER_FALLBACK_ENABLED_KEY =
+	"proxy_attempt_worker_fallback_enabled";
+const PROXY_ATTEMPT_WORKER_FALLBACK_THRESHOLD_KEY =
+	"proxy_attempt_worker_fallback_threshold";
+const PROXY_LARGE_REQUEST_OFFLOAD_THRESHOLD_BYTES_KEY =
+	"proxy_large_request_offload_threshold_bytes";
+const ATTEMPT_LOG_ENABLED_KEY = "attempt_log_enabled";
+const ATTEMPT_LOG_RETENTION_DAYS_KEY = "attempt_log_retention_days";
+
+const RUNTIME_SETTING_KEYS = [
+	PROXY_UPSTREAM_TIMEOUT_KEY,
+	PROXY_RETRY_MAX_RETRIES_KEY,
+	PROXY_RETRY_SLEEP_MS_KEY,
+	PROXY_RETRY_SKIP_ERROR_CODES_KEY,
+	PROXY_RETRY_SLEEP_ERROR_CODES_KEY,
+	PROXY_ZERO_COMPLETION_AS_ERROR_KEY,
+	MODEL_FAILURE_COOLDOWN_KEY,
+	MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY,
+	MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY,
+	PROXY_STREAM_USAGE_MODE_KEY,
+	PROXY_STREAM_USAGE_MAX_BYTES_KEY,
+	PROXY_STREAM_USAGE_MAX_PARSERS_KEY,
+	PROXY_STREAM_USAGE_PARSE_TIMEOUT_KEY,
+	PROXY_RESPONSES_AFFINITY_TTL_KEY,
+	PROXY_STREAM_OPTIONS_CAPABILITY_TTL_KEY,
+	PROXY_ATTEMPT_WORKER_FALLBACK_ENABLED_KEY,
+	PROXY_ATTEMPT_WORKER_FALLBACK_THRESHOLD_KEY,
+	PROXY_LARGE_REQUEST_OFFLOAD_THRESHOLD_BYTES_KEY,
+	ATTEMPT_LOG_ENABLED_KEY,
+	ATTEMPT_LOG_RETENTION_DAYS_KEY,
+] as const;
+
+export type RuntimeProxyConfig = {
+	upstream_timeout_ms: number;
+	retry_max_retries: number;
+	retry_sleep_ms: number;
+	retry_skip_error_codes: string[];
+	retry_sleep_error_codes: string[];
+	zero_completion_as_error_enabled: boolean;
+	model_failure_cooldown_minutes: number;
+	model_failure_cooldown_threshold: number;
+	model_failure_auto_disable_threshold: number;
+	stream_usage_mode: string;
+	stream_usage_max_bytes: number;
+	stream_usage_max_parsers: number;
+	attempt_worker_fallback_enabled: boolean;
+	attempt_worker_fallback_threshold: number;
+	large_request_offload_threshold_bytes: number;
+	attempt_log_enabled: boolean;
+	attempt_log_retention_days: number;
+	attempt_worker_bound: boolean;
+	attempt_worker_fallback_active: boolean;
+};
+
+export type ProxyRuntimeSettings = {
+	upstream_timeout_ms: number;
+	retry_max_retries: number;
+	retry_sleep_ms: number;
+	retry_skip_error_codes: string[];
+	retry_sleep_error_codes: string[];
+	zero_completion_as_error_enabled: boolean;
+	model_failure_cooldown_minutes: number;
+	model_failure_cooldown_threshold: number;
+	model_failure_auto_disable_threshold: number;
+	stream_usage_mode: string;
+	stream_usage_max_bytes: number;
+	stream_usage_max_parsers: number;
+	stream_usage_parse_timeout_ms: number;
+	responses_affinity_ttl_seconds: number;
+	stream_options_capability_ttl_seconds: number;
+	attempt_worker_fallback_enabled: boolean;
+	attempt_worker_fallback_threshold: number;
+	large_request_offload_threshold_bytes: number;
+	attempt_log_enabled: boolean;
+	attempt_log_retention_days: number;
+};
+
+type SettingSnapshot<T> = {
+	value: T;
+	expiresAt: number;
+};
+
+let retentionSnapshot: SettingSnapshot<number> | null = null;
+let sessionTtlSnapshot: SettingSnapshot<number> | null = null;
+let adminPasswordSnapshot: SettingSnapshot<string | null> | null = null;
+let checkinScheduleSnapshot: SettingSnapshot<string> | null = null;
+let modelCooldownSnapshot: SettingSnapshot<number> | null = null;
+let runtimeSettingsSnapshot: SettingSnapshot<ProxyRuntimeSettings> | null =
+	null;
 
 async function readSetting(
 	db: D1Database,
@@ -20,6 +153,25 @@ async function readSetting(
 		.bind(key)
 		.first<{ value?: string }>();
 	return setting?.value ? String(setting.value) : null;
+}
+
+async function readSettingsByKeys(
+	db: D1Database,
+	keys: readonly string[],
+): Promise<Record<string, string>> {
+	if (keys.length === 0) {
+		return {};
+	}
+	const placeholders = keys.map(() => "?").join(", ");
+	const result = await db
+		.prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`)
+		.bind(...keys)
+		.all<{ key: string; value: string }>();
+	const map: Record<string, string> = {};
+	for (const row of result.results ?? []) {
+		map[String(row.key)] = String(row.value);
+	}
+	return map;
 }
 
 async function upsertSetting(
@@ -46,12 +198,436 @@ function parsePositiveNumber(value: string | null, fallback: number): number {
 	return fallback;
 }
 
+function parseNonNegativeSetting(
+	value: string | null,
+	fallback: number,
+): number {
+	if (!value) {
+		return fallback;
+	}
+	const parsed = Number(value);
+	if (!Number.isNaN(parsed) && parsed >= 0) {
+		return Math.floor(parsed);
+	}
+	return fallback;
+}
+
+function parsePositiveSetting(value: string | null, fallback: number): number {
+	if (!value) {
+		return fallback;
+	}
+	const parsed = Number(value);
+	if (!Number.isNaN(parsed) && parsed > 0) {
+		return Math.floor(parsed);
+	}
+	return fallback;
+}
+
+function parseBooleanSetting(value: string | null, fallback: boolean): boolean {
+	if (value === null || value === undefined) {
+		return fallback;
+	}
+	const normalized = value.trim().toLowerCase();
+	if (["1", "true", "yes", "on"].includes(normalized)) {
+		return true;
+	}
+	if (["0", "false", "no", "off"].includes(normalized)) {
+		return false;
+	}
+	return fallback;
+}
+
+async function getCachedSetting<T>(
+	snapshot: SettingSnapshot<T> | null,
+	loader: () => Promise<T>,
+	onUpdate: (next: SettingSnapshot<T> | null) => void,
+): Promise<T> {
+	if (snapshot && snapshot.expiresAt > Date.now()) {
+		return snapshot.value;
+	}
+	const value = await loader();
+	onUpdate({
+		value,
+		expiresAt: Date.now() + SETTING_SNAPSHOT_TTL_MS,
+	});
+	return value;
+}
+
+function clearRuntimeSnapshots(): void {
+	runtimeSettingsSnapshot = null;
+	modelCooldownSnapshot = null;
+}
+
+function normalizeStreamUsageMode(value: string | undefined): string {
+	const normalized = (value ?? "").toLowerCase();
+	if (normalized === "off" || normalized === "full" || normalized === "lite") {
+		return normalized;
+	}
+	return DEFAULT_PROXY_STREAM_USAGE_MODE;
+}
+
+export function normalizeErrorCodeList(input: unknown): string[] | null {
+	let values: string[] = [];
+	if (typeof input === "string") {
+		values = input.split(/[,\n]/g);
+	} else if (Array.isArray(input)) {
+		values = input.filter((item) => typeof item === "string") as string[];
+	} else {
+		return null;
+	}
+	const normalized = values
+		.map((item) => item.trim().toLowerCase())
+		.filter((item) => item.length > 0);
+	return Array.from(new Set(normalized));
+}
+
+function stringifyErrorCodeList(codes: string[]): string {
+	return Array.from(
+		new Set(
+			codes
+				.map((code) => code.trim().toLowerCase())
+				.filter((code) => code.length > 0),
+		),
+	).join(",");
+}
+
+function parseErrorCodeListSetting(
+	value: string | null,
+	fallback: string[],
+): string[] {
+	const normalized = normalizeErrorCodeList(value);
+	return normalized ?? [...fallback];
+}
+
+export async function getProxyRuntimeSettings(
+	db: D1Database,
+): Promise<ProxyRuntimeSettings> {
+	const snapshot = runtimeSettingsSnapshot;
+	if (snapshot && snapshot.expiresAt > Date.now()) {
+		return snapshot.value;
+	}
+
+	const settings = await readSettingsByKeys(db, RUNTIME_SETTING_KEYS);
+	const value: ProxyRuntimeSettings = {
+		upstream_timeout_ms: parseNonNegativeSetting(
+			settings[PROXY_UPSTREAM_TIMEOUT_KEY] ?? null,
+			DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS,
+		),
+		retry_max_retries: parseNonNegativeSetting(
+			settings[PROXY_RETRY_MAX_RETRIES_KEY] ?? null,
+			DEFAULT_PROXY_RETRY_MAX_RETRIES,
+		),
+		retry_sleep_ms: parseNonNegativeSetting(
+			settings[PROXY_RETRY_SLEEP_MS_KEY] ?? null,
+			DEFAULT_PROXY_RETRY_SLEEP_MS,
+		),
+		retry_skip_error_codes: parseErrorCodeListSetting(
+			settings[PROXY_RETRY_SKIP_ERROR_CODES_KEY] ?? null,
+			DEFAULT_PROXY_RETRY_SKIP_ERROR_CODES,
+		),
+		retry_sleep_error_codes: parseErrorCodeListSetting(
+			settings[PROXY_RETRY_SLEEP_ERROR_CODES_KEY] ?? null,
+			DEFAULT_PROXY_RETRY_SLEEP_ERROR_CODES,
+		),
+		zero_completion_as_error_enabled: parseBooleanSetting(
+			settings[PROXY_ZERO_COMPLETION_AS_ERROR_KEY] ?? null,
+			DEFAULT_PROXY_ZERO_COMPLETION_AS_ERROR_ENABLED,
+		),
+		model_failure_cooldown_minutes: parseNonNegativeSetting(
+			settings[MODEL_FAILURE_COOLDOWN_KEY] ?? null,
+			DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES,
+		),
+		model_failure_cooldown_threshold: parsePositiveSetting(
+			settings[MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY] ?? null,
+			DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD,
+		),
+		model_failure_auto_disable_threshold: parsePositiveSetting(
+			settings[MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY] ?? null,
+			DEFAULT_MODEL_FAILURE_AUTO_DISABLE_THRESHOLD,
+		),
+		stream_usage_mode: normalizeStreamUsageMode(
+			settings[PROXY_STREAM_USAGE_MODE_KEY],
+		),
+		stream_usage_max_bytes: parseNonNegativeSetting(
+			settings[PROXY_STREAM_USAGE_MAX_BYTES_KEY] ?? null,
+			DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES,
+		),
+		stream_usage_max_parsers: parseNonNegativeSetting(
+			settings[PROXY_STREAM_USAGE_MAX_PARSERS_KEY] ?? null,
+			DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS,
+		),
+		stream_usage_parse_timeout_ms: parseNonNegativeSetting(
+			settings[PROXY_STREAM_USAGE_PARSE_TIMEOUT_KEY] ?? null,
+			DEFAULT_PROXY_STREAM_USAGE_PARSE_TIMEOUT_MS,
+		),
+		responses_affinity_ttl_seconds: parsePositiveSetting(
+			settings[PROXY_RESPONSES_AFFINITY_TTL_KEY] ?? null,
+			DEFAULT_PROXY_RESPONSES_AFFINITY_TTL_SECONDS,
+		),
+		stream_options_capability_ttl_seconds: parsePositiveSetting(
+			settings[PROXY_STREAM_OPTIONS_CAPABILITY_TTL_KEY] ?? null,
+			DEFAULT_PROXY_STREAM_OPTIONS_CAPABILITY_TTL_SECONDS,
+		),
+		attempt_worker_fallback_enabled: parseBooleanSetting(
+			settings[PROXY_ATTEMPT_WORKER_FALLBACK_ENABLED_KEY] ?? null,
+			DEFAULT_PROXY_ATTEMPT_WORKER_FALLBACK_ENABLED,
+		),
+		attempt_worker_fallback_threshold: parsePositiveSetting(
+			settings[PROXY_ATTEMPT_WORKER_FALLBACK_THRESHOLD_KEY] ?? null,
+			DEFAULT_PROXY_ATTEMPT_WORKER_FALLBACK_THRESHOLD,
+		),
+		large_request_offload_threshold_bytes: parseNonNegativeSetting(
+			settings[PROXY_LARGE_REQUEST_OFFLOAD_THRESHOLD_BYTES_KEY] ?? null,
+			DEFAULT_PROXY_LARGE_REQUEST_OFFLOAD_THRESHOLD_BYTES,
+		),
+		attempt_log_enabled: parseBooleanSetting(
+			settings[ATTEMPT_LOG_ENABLED_KEY] ?? null,
+			DEFAULT_ATTEMPT_LOG_ENABLED,
+		),
+		attempt_log_retention_days: parsePositiveSetting(
+			settings[ATTEMPT_LOG_RETENTION_DAYS_KEY] ?? null,
+			DEFAULT_ATTEMPT_LOG_RETENTION_DAYS,
+		),
+	};
+	runtimeSettingsSnapshot = {
+		value,
+		expiresAt: Date.now() + RUNTIME_SETTING_SNAPSHOT_TTL_MS,
+	};
+	return value;
+}
+
+/**
+ * Returns runtime proxy configuration derived from settings and environment.
+ *
+ * @param env - Worker bindings.
+ * @param settings - Runtime settings snapshot.
+ * @returns Runtime proxy configuration for display.
+ */
+export function getRuntimeProxyConfig(
+	env: Bindings,
+	settings: ProxyRuntimeSettings,
+): RuntimeProxyConfig {
+	const attemptWorkerBound = Boolean(env.ATTEMPT_WORKER);
+	return {
+		...settings,
+		attempt_worker_bound: attemptWorkerBound,
+		attempt_worker_fallback_active:
+			attemptWorkerBound && settings.attempt_worker_fallback_enabled,
+	};
+}
+
+export async function setProxyRuntimeSettings(
+	db: D1Database,
+	update: Partial<ProxyRuntimeSettings>,
+): Promise<void> {
+	const tasks: Promise<void>[] = [];
+	if (update.upstream_timeout_ms !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_UPSTREAM_TIMEOUT_KEY,
+				String(Math.max(0, Math.floor(update.upstream_timeout_ms))),
+			),
+		);
+	}
+	if (update.retry_max_retries !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RETRY_MAX_RETRIES_KEY,
+				String(Math.max(0, Math.floor(update.retry_max_retries))),
+			),
+		);
+	}
+	if (update.retry_sleep_ms !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RETRY_SLEEP_MS_KEY,
+				String(Math.max(0, Math.floor(update.retry_sleep_ms))),
+			),
+		);
+	}
+	if (update.retry_skip_error_codes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RETRY_SKIP_ERROR_CODES_KEY,
+				stringifyErrorCodeList(update.retry_skip_error_codes),
+			),
+		);
+	}
+	if (update.retry_sleep_error_codes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RETRY_SLEEP_ERROR_CODES_KEY,
+				stringifyErrorCodeList(update.retry_sleep_error_codes),
+			),
+		);
+	}
+	if (update.zero_completion_as_error_enabled !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_ZERO_COMPLETION_AS_ERROR_KEY,
+				update.zero_completion_as_error_enabled ? "1" : "0",
+			),
+		);
+	}
+	if (update.model_failure_cooldown_minutes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				MODEL_FAILURE_COOLDOWN_KEY,
+				String(Math.max(0, Math.floor(update.model_failure_cooldown_minutes))),
+			),
+		);
+	}
+	if (update.model_failure_cooldown_threshold !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY,
+				String(
+					Math.max(1, Math.floor(update.model_failure_cooldown_threshold)),
+				),
+			),
+		);
+	}
+	if (update.model_failure_auto_disable_threshold !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY,
+				String(
+					Math.max(1, Math.floor(update.model_failure_auto_disable_threshold)),
+				),
+			),
+		);
+	}
+	if (update.stream_usage_mode !== undefined) {
+		tasks.push(
+			upsertSetting(db, PROXY_STREAM_USAGE_MODE_KEY, update.stream_usage_mode),
+		);
+	}
+	if (update.stream_usage_max_bytes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_STREAM_USAGE_MAX_BYTES_KEY,
+				String(Math.max(0, Math.floor(update.stream_usage_max_bytes))),
+			),
+		);
+	}
+	if (update.stream_usage_max_parsers !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_STREAM_USAGE_MAX_PARSERS_KEY,
+				String(Math.max(0, Math.floor(update.stream_usage_max_parsers))),
+			),
+		);
+	}
+	if (update.stream_usage_parse_timeout_ms !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_STREAM_USAGE_PARSE_TIMEOUT_KEY,
+				String(Math.max(0, Math.floor(update.stream_usage_parse_timeout_ms))),
+			),
+		);
+	}
+	if (update.responses_affinity_ttl_seconds !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_RESPONSES_AFFINITY_TTL_KEY,
+				String(Math.max(1, Math.floor(update.responses_affinity_ttl_seconds))),
+			),
+		);
+	}
+	if (update.stream_options_capability_ttl_seconds !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_STREAM_OPTIONS_CAPABILITY_TTL_KEY,
+				String(
+					Math.max(1, Math.floor(update.stream_options_capability_ttl_seconds)),
+				),
+			),
+		);
+	}
+	if (update.attempt_worker_fallback_enabled !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_ATTEMPT_WORKER_FALLBACK_ENABLED_KEY,
+				update.attempt_worker_fallback_enabled ? "1" : "0",
+			),
+		);
+	}
+	if (update.attempt_worker_fallback_threshold !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_ATTEMPT_WORKER_FALLBACK_THRESHOLD_KEY,
+				String(
+					Math.max(1, Math.floor(update.attempt_worker_fallback_threshold)),
+				),
+			),
+		);
+	}
+	if (update.large_request_offload_threshold_bytes !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				PROXY_LARGE_REQUEST_OFFLOAD_THRESHOLD_BYTES_KEY,
+				String(
+					Math.max(0, Math.floor(update.large_request_offload_threshold_bytes)),
+				),
+			),
+		);
+	}
+	if (update.attempt_log_enabled !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				ATTEMPT_LOG_ENABLED_KEY,
+				update.attempt_log_enabled ? "1" : "0",
+			),
+		);
+	}
+	if (update.attempt_log_retention_days !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				ATTEMPT_LOG_RETENTION_DAYS_KEY,
+				String(Math.max(1, Math.floor(update.attempt_log_retention_days))),
+			),
+		);
+	}
+	if (tasks.length === 0) {
+		return;
+	}
+	await Promise.all(tasks);
+	clearRuntimeSnapshots();
+}
+
 /**
  * Returns the log retention days from settings or default fallback.
  */
 export async function getRetentionDays(db: D1Database): Promise<number> {
-	const value = await readSetting(db, RETENTION_KEY);
-	return parsePositiveNumber(value, DEFAULT_LOG_RETENTION_DAYS);
+	return getCachedSetting(
+		retentionSnapshot,
+		async () => {
+			const value = await readSetting(db, RETENTION_KEY);
+			return parsePositiveNumber(value, DEFAULT_LOG_RETENTION_DAYS);
+		},
+		(next) => {
+			retentionSnapshot = next;
+		},
+	);
 }
 
 /**
@@ -63,14 +639,23 @@ export async function setRetentionDays(
 ): Promise<void> {
 	const value = Math.max(1, Math.floor(days)).toString();
 	await upsertSetting(db, RETENTION_KEY, value);
+	retentionSnapshot = null;
 }
 
 /**
  * Returns the session TTL hours from settings or default fallback.
  */
 export async function getSessionTtlHours(db: D1Database): Promise<number> {
-	const value = await readSetting(db, SESSION_TTL_KEY);
-	return parsePositiveNumber(value, DEFAULT_SESSION_TTL_HOURS);
+	return getCachedSetting(
+		sessionTtlSnapshot,
+		async () => {
+			const value = await readSetting(db, SESSION_TTL_KEY);
+			return parsePositiveNumber(value, DEFAULT_SESSION_TTL_HOURS);
+		},
+		(next) => {
+			sessionTtlSnapshot = next;
+		},
+	);
 }
 
 /**
@@ -82,6 +667,7 @@ export async function setSessionTtlHours(
 ): Promise<void> {
 	const value = Math.max(1, Math.floor(hours)).toString();
 	await upsertSetting(db, SESSION_TTL_KEY, value);
+	sessionTtlSnapshot = null;
 }
 
 /**
@@ -90,7 +676,13 @@ export async function setSessionTtlHours(
 export async function getAdminPasswordHash(
 	db: D1Database,
 ): Promise<string | null> {
-	return readSetting(db, ADMIN_PASSWORD_HASH_KEY);
+	return getCachedSetting(
+		adminPasswordSnapshot,
+		() => readSetting(db, ADMIN_PASSWORD_HASH_KEY),
+		(next) => {
+			adminPasswordSnapshot = next;
+		},
+	);
 }
 
 /**
@@ -104,6 +696,7 @@ export async function setAdminPasswordHash(
 		return;
 	}
 	await upsertSetting(db, ADMIN_PASSWORD_HASH_KEY, hash);
+	adminPasswordSnapshot = null;
 }
 
 /**
@@ -115,10 +708,18 @@ export async function isAdminPasswordSet(db: D1Database): Promise<boolean> {
 }
 
 export async function getCheckinScheduleTime(db: D1Database): Promise<string> {
-	const timeRaw = await readSetting(db, CHECKIN_SCHEDULE_TIME_KEY);
-	return timeRaw && timeRaw.length > 0
-		? timeRaw
-		: DEFAULT_CHECKIN_SCHEDULE_TIME;
+	return getCachedSetting(
+		checkinScheduleSnapshot,
+		async () => {
+			const timeRaw = await readSetting(db, CHECKIN_SCHEDULE_TIME_KEY);
+			return timeRaw && timeRaw.length > 0
+				? timeRaw
+				: DEFAULT_CHECKIN_SCHEDULE_TIME;
+		},
+		(next) => {
+			checkinScheduleSnapshot = next;
+		},
+	);
 }
 
 export async function setCheckinScheduleTime(
@@ -126,33 +727,52 @@ export async function setCheckinScheduleTime(
 	time: string,
 ): Promise<void> {
 	await upsertSetting(db, CHECKIN_SCHEDULE_TIME_KEY, time);
+	checkinScheduleSnapshot = null;
 }
 
 export async function getModelFailureCooldownMinutes(
 	db: D1Database,
 ): Promise<number> {
-	const value = await readSetting(db, MODEL_FAILURE_COOLDOWN_KEY);
-	return parsePositiveNumber(value, DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES);
+	return getCachedSetting(
+		modelCooldownSnapshot,
+		async () => {
+			const value = await readSetting(db, MODEL_FAILURE_COOLDOWN_KEY);
+			return parseNonNegativeSetting(
+				value,
+				DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES,
+			);
+		},
+		(next) => {
+			modelCooldownSnapshot = next;
+		},
+	);
+}
+
+export async function getAttemptLogRetentionDays(
+	db: D1Database,
+): Promise<number> {
+	const value = await readSetting(db, ATTEMPT_LOG_RETENTION_DAYS_KEY);
+	return parsePositiveNumber(value, DEFAULT_ATTEMPT_LOG_RETENTION_DAYS);
 }
 
 export async function setModelFailureCooldownMinutes(
 	db: D1Database,
 	minutes: number,
 ): Promise<void> {
-	const value = Math.max(1, Math.floor(minutes)).toString();
+	const value = Math.max(0, Math.floor(minutes)).toString();
 	await upsertSetting(db, MODEL_FAILURE_COOLDOWN_KEY, value);
+	modelCooldownSnapshot = null;
+	clearRuntimeSnapshots();
 }
 
 /**
- * Loads generic settings as a key/value map.
+ * Resets in-memory setting snapshots (testing utility).
  */
-export async function listSettings(
-	db: D1Database,
-): Promise<Record<string, string>> {
-	const result = await db.prepare("SELECT key, value FROM settings").all();
-	const map: Record<string, string> = {};
-	for (const row of result.results ?? []) {
-		map[String(row.key)] = String(row.value);
-	}
-	return map;
+export function resetSettingsSnapshots(): void {
+	retentionSnapshot = null;
+	sessionTtlSnapshot = null;
+	adminPasswordSnapshot = null;
+	checkinScheduleSnapshot = null;
+	modelCooldownSnapshot = null;
+	runtimeSettingsSnapshot = null;
 }
